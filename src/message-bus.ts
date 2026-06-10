@@ -24,6 +24,9 @@ export class MessageBus {
   private recentIncoming: Map<string, PipMessage> = new Map(); // from agent -> last message
   private recentOutgoing: Map<string, PipMessage> = new Map(); // to agent -> last message
 
+  // Track processed message IDs to prevent duplicates
+  private processedMessageIds: Set<string> = new Set();
+
   constructor(
     private agentName: string,
     private cwd: string,
@@ -214,6 +217,16 @@ export class MessageBus {
   private handleIncomingMessage(msg: PipMessage): void {
     // Don't process our own messages
     if (msg.from === this.agentName) return;
+
+    // Prevent duplicate processing (same message arriving via multiple channels)
+    if (this.processedMessageIds.has(msg.id)) return;
+    this.processedMessageIds.add(msg.id);
+
+    // Keep the set from growing too large (retain last 1000 message IDs)
+    if (this.processedMessageIds.size > 1000) {
+      const firstKey = this.processedMessageIds.values().next().value;
+      if (firstKey) this.processedMessageIds.delete(firstKey);
+    }
 
     // Track incoming message for smart reply detection
     this.trackIncoming(msg);

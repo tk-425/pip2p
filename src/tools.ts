@@ -79,11 +79,13 @@ function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
         };
       }
 
-      // Smart reply detection: if target recently sent us a message, treat this as a response
+      // Smart reply detection: if target recently sent us a task/message (not a response), treat this as a response
       let finalType: MessageType = type;
       let finalInReplyTo: string | undefined;
       const recentFromTarget = ctx.messageBus.hasRecentFrom(to);
-      if (recentFromTarget && type !== "response") {
+      if (recentFromTarget && recentFromTarget.type !== "response" && type !== "response") {
+        // Only auto-convert if the recent incoming was a task/message (active request from them)
+        // If their last message was a response, the conversation round is done — new messages are new tasks
         finalType = "response";
         finalInReplyTo = recentFromTarget.id;
       }
