@@ -1,10 +1,10 @@
 /**
- * pip2p - Pi-to-Pi Multi-Agent Communication Extension
+ * pip2p - Peer-to-Peer Multi-Agent Communication Extension
  *
- * Entry point for the pi extension.
+ * Compatible with pi and oh-my-pi (omp).
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, BeforeAgentStartEvent, BeforeAgentStartEventResult } from "@earendil-works/pi-coding-agent";
 import { MessageBus } from "./message-bus.js";
 import { WidgetManager } from "./widget-manager.js";
 import {
@@ -23,6 +23,20 @@ import { PipServer } from "./server.js";
 import { createTools } from "./tools.js";
 import type { ConnectionStatus } from "./types.js";
 
+
+function buildIdentityBlock(agentName: string): string {
+  return `## pip2p Agent
+
+This agent is registered as **${agentName}** on the pip2p network.
+
+Available peer communication tools:
+- **send_to_agent** — Send a task or message to another agent by name
+- **get_inbox** — Retrieve messages from your inbox (optionally filter by sender)
+- **reply_to_agent** — Reply to a specific message with threading support
+- **list_agents** — Show all active agents and their connection status
+
+When the user asks you to send a message to another agent, use the **send_to_agent** tool. Do NOT read source files or try to understand the messaging system — the tools are already available.`;
+}
 export default function (pi: ExtensionAPI) {
   let messageBus: MessageBus | null = null;
   let widgetManager: WidgetManager | null = null;
@@ -30,15 +44,16 @@ export default function (pi: ExtensionAPI) {
   let connectionStatus: ConnectionStatus = "file";
   let server: PipServer | null = null;
 
+
+
   // Initialize on session start
   pi.on("session_start", async (_event, ctx) => {
-    // Prompt user for agent name
     if (!ctx.hasUI) return;
-    
+
     const name = await ctx.ui.input("Agent name", "Enter your agent name (e.g., alice, bob):");
-    if (!name) return;
-    
-    agentName = name;
+    if (!name?.trim()) return;
+
+    agentName = name.trim();
 
     const cwd = ctx.cwd;
 
@@ -120,6 +135,11 @@ export default function (pi: ExtensionAPI) {
     for (const tool of tools) {
       pi.registerTool(tool as any);
     }
+
+    // Inject identity block into system prompt
+    pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
+      return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(agentName!) };
+    });
 
     ctx.ui.notify(
       `pip2p: ${agentName} joined as ${role} (${connectionStatus} mode)`,

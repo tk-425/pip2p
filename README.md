@@ -1,6 +1,6 @@
 # pip2p
 
-Peer-to-peer multi-agent communication extension for [pi](https://github.com/earendil-works/pi). Enable multiple pi instances to communicate directly with each other in real-time.
+Peer-to-peer multi-agent communication extension for [pi](https://github.com/earendil-works/pi) and [oh-my-pi (omp)](https://github.com/earendil-works/oh-my-pi). Enable multiple agent instances to communicate directly with each other in real-time.
 
 ## Features
 
@@ -40,37 +40,45 @@ pnpm install
 pnpm run build
 ```
 
-4. Create symlink to pi's global extensions folder:
+4. Install the extension:
 
 ```bash
+# For pi:
 ln -s "$(pwd)" ~/.pi/agent/extensions/pip2p
+
+# For omp:
+omp plugin link "$(pwd)"
 ```
 
 5. Verify installation:
 
 ```bash
+# pi:
 ls -la ~/.pi/agent/extensions/pip2p
+
+# omp:
+omp plugin list
 ```
 
 ## Usage
 
-Start multiple pi instances in the same project directory:
+Start multiple instances in the same project directory. Each will prompt for an agent name on startup:
 
 ```bash
-# Terminal 1
-pi
+# Terminal 1 (pi or omp)
+pi    # or: omp
 # When prompted, enter: alice
 
-# Terminal 2
-pi
+# Terminal 2 (pi or omp)
+pi    # or: omp
 # When prompted, enter: bob
 
-# Terminal 3
-pi
+# Terminal 3 (pi or omp)
+pi    # or: omp
 # When prompted, enter: carol
 ```
 
-Each pi instance will prompt you for an agent name on startup. The first agent becomes the coordinator, and subsequent agents join as workers.
+The first agent becomes the coordinator, and subsequent agents join as workers.
 
 ### Sending Messages
 
