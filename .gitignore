@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Env
+.env
+.env.*
+
+.docs/
+.devflow/
+.devflow-archive/
+CONTEXT.md
+
+.agents/
+.claude/
+.codex/
+.opencode/
+.mcp.json
+opencode.json
+
+# BEGIN MCPKIT
+# mcpkit generated local MCP wrappers
+.mcpkit/
+# END MCPKIT
+
+.pip2p/

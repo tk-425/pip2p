@@ -1,0 +1,33 @@
+{
+  "name": "pip2p",
+  "version": "1.0.0",
+  "description": "Pi-to-Pi multi-agent communication extension",
+  "type": "module",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["pi-extension", "pip2p", "multi-agent"],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^11.5.2",
+      "onFail": "download"
+    }
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@sinclair/typebox": "^0.34.0",
+    "@types/node": "^25.9.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
+  }
+}
