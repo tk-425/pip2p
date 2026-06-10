@@ -15,7 +15,7 @@ Peer-to-peer multi-agent communication extension for [pi](https://github.com/ear
 
 ### Prerequisites
 
-- [pi](https://github.com/earendil-works/pi) installed
+- [pi](https://github.com/earendil-works/pi) **or** [omp](https://github.com/earendil-works/oh-my-pi) installed
 - Node.js 18+
 - pnpm
 
@@ -225,20 +225,22 @@ pnpm run watch
 
 ### Testing
 
-Start two pi instances and test messaging:
+Start two instances (pi or omp) and test messaging:
 
 ```bash
 # Terminal 1
-pi --agent-name alice
+pi    # or: omp
+# When prompted, enter: alice
 
 # Terminal 2
-pi --agent-name bob
+pi    # or: omp
+# When prompted, enter: bob
 
-# In alice's pi, send a message
-send_to_agent --to bob --message "Hello Bob!"
+# In alice's terminal, send a message
+# Type: send a message to bob saying "Hello Bob!"
 
-# In bob's pi, check inbox
-get_inbox
+# In bob's terminal, check inbox
+# Type: check my inbox
 ```
 
 ## Troubleshooting
@@ -247,7 +249,9 @@ get_inbox
 
 - Ensure all agents are in the same project directory
 - Check if port 7000-7100 is available
-- Verify symlink: `ls -la ~/.pi/agent/extensions/pip2p`
+- Verify installation:
+  - pi: `ls -la ~/.pi/agent/extensions/pip2p`
+  - omp: `omp plugin list`
 
 ### Messages not delivered
 
@@ -258,8 +262,10 @@ get_inbox
 ### Extension not loading
 
 - Rebuild: `pnpm run build`
-- Reinstall symlink: `rm ~/.pi/agent/extensions/pip2p && ln -s "$(pwd)" ~/.pi/agent/extensions/pip2p`
-- Check pi logs for errors
+- Reinstall:
+  - pi: `rm ~/.pi/agent/extensions/pip2p && ln -s "$(pwd)" ~/.pi/agent/extensions/pip2p`
+  - omp: `omp plugin uninstall pip2p && omp plugin link "$(pwd)"`
+- Check logs for errors
 
 ## License
 
