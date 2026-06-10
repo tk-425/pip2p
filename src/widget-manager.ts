@@ -114,7 +114,8 @@ export class WidgetManager {
     }
 
     const statusIndicator = connectionStatus === "live" ? "🟢 Live" : "🟡 File Mode";
-    const lines: string[] = [`Agents: ${statusIndicator}`];
+    const width = (process.stdout.columns || 80) - 2; // account for widget indent
+    const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}`];
 
     for (const agent of otherAgents) {
       const marker = agent.isCoordinator ? "👑 " : "   ";

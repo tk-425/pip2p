@@ -87,8 +87,8 @@ export default function (pi: ExtensionAPI) {
       
       if (msg.type !== "response") {
         // Task and message types auto-inject so agent processes them
-        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\nIMPORTANT:\n1. First, work out your response and SHOW it to your user so they can see what you're sending.\n2. Then use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\nThe message content is already provided above — you do NOT need to call get_inbox.`;
-        
+        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+
         pi.sendUserMessage(instruction);
       } else {
         // Response messages go to inbox widget only
@@ -135,12 +135,8 @@ export default function (pi: ExtensionAPI) {
       return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(toolCtx.agentName!) };
     });
 
-    ctx.ui.notify(
-      `pip2p: ${toolCtx.agentName} joined as ${role} (${connectionStatus} mode)`,
-      "info",
-    );
+    ctx.ui.notify(`pip2p: ${toolCtx.agentName} joined`, "info");
   });
-
   // Cleanup on shutdown
   pi.on("session_shutdown", async (_event, _ctx) => {
     if (toolCtx.agentName) {
