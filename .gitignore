@@ -25,6 +25,8 @@ CONTEXT.md
 .opencode/
 .mcp.json
 opencode.json
+CLAUDE.md
+AGENTS.md
 
 # BEGIN MCPKIT
 # mcpkit generated local MCP wrappers
@@ -33,3 +35,4 @@ opencode.json
 
 .pip2p/
 .codegraph/
+graphify-out/
