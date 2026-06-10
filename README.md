@@ -24,7 +24,7 @@ Peer-to-peer multi-agent communication extension for [pi](https://github.com/ear
 1. Clone or download this repository:
 
 ```bash
-git clone <repository-url> pip2p
+git clone https://github.com/tk-425/pip2p.git
 cd pip2p
 ```
 
