@@ -2,41 +2,35 @@
  * Custom Tools - pip2p tools for agent communication
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { Type } from "@sinclair/typebox";
-import { getInboxDir, getOtherAgents, readAgentRegistry } from "./agent-registry.js";
-import { formatMessage, detectSkillReference } from "./skill-detect.js";
+import { getOtherAgents } from "./agent-registry.js";
+import { formatMessage } from "./skill-detect.js";
 import type { MessageBus } from "./message-bus.js";
 import type { WidgetManager } from "./widget-manager.js";
 import type { PipMessage, MessageType } from "./types.js";
 
-interface ToolContext {
-  agentName: string;
+export interface ToolContext {
+  agentName: string | null;
   cwd: string;
-  messageBus: MessageBus;
-  widgetManager: WidgetManager;
+  messageBus: MessageBus | null;
+  widgetManager: WidgetManager | null;
 }
 
-interface ToolDefinition {
-  name: string;
-  label: string;
-  description: string;
-  promptSnippet?: string;
-  parameters: object;
-  execute: (
-    toolCallId: string,
-    params: any,
-    signal: AbortSignal | undefined,
-    onUpdate: ((result: any) => void) | undefined,
-    ctx: any,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; details: Record<string, unknown> }>;
+type ReadyToolContext = {
+  [K in keyof ToolContext]: NonNullable<ToolContext[K]>;
+};
+
+function getState(ctx: ToolContext): ReadyToolContext {
+  if (!ctx.agentName || !ctx.messageBus || !ctx.widgetManager) {
+    throw new Error("pip2p: not initialized — wait for session to start before using pip2p tools");
+  }
+  return ctx as ReadyToolContext;
 }
 
 /**
  * Create all pip2p tools
  */
-export function createTools(toolCtx: ToolContext): ToolDefinition[] {
+export function createTools(toolCtx: ToolContext) {
   return [
     createSendToAgentTool(toolCtx),
     createGetInboxTool(toolCtx),
@@ -45,12 +39,11 @@ export function createTools(toolCtx: ToolContext): ToolDefinition[] {
   ];
 }
 
-function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
+function createSendToAgentTool(ctx: ToolContext) {
   return {
     name: "send_to_agent",
     label: "Send to Agent",
     description: "Send a task or message to another agent in the pip2p network",
-    promptSnippet: "Send a message or task to another agent by name",
     parameters: Type.Object({
       to: Type.String({ description: "Target agent name" }),
       message: Type.String({ description: "Message or task description" }),
@@ -60,11 +53,12 @@ function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
         }),
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId: string, params: any) {
+      const s = getState(ctx);
       const { to, message, type = "task" } = params;
 
       // Validate target agent exists
-      const otherAgents = getOtherAgents(ctx.cwd, ctx.agentName);
+      const otherAgents = getOtherAgents(s.cwd, s.agentName);
       const target = otherAgents.find((a) => a.name === to);
       if (!target) {
         const available = otherAgents.map((a) => a.name).join(", ") || "none";
@@ -82,7 +76,7 @@ function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
       // Smart reply detection: if target recently sent us a task/message (not a response), treat this as a response
       let finalType: MessageType = type;
       let finalInReplyTo: string | undefined;
-      const recentFromTarget = ctx.messageBus.hasRecentFrom(to);
+      const recentFromTarget = s.messageBus.hasRecentFrom(to);
       if (recentFromTarget && recentFromTarget.type !== "response" && type !== "response") {
         // Only auto-convert if the recent incoming was a task/message (active request from them)
         // If their last message was a response, the conversation round is done — new messages are new tasks
@@ -90,9 +84,9 @@ function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
         finalInReplyTo = recentFromTarget.id;
       }
 
-      const sent = ctx.messageBus.sendMessage(to, message, finalType, finalInReplyTo);
+      const sent = s.messageBus.sendMessage(to, message, finalType, finalInReplyTo);
 
-      let responseText = `Message sent to ${to} (${ctx.messageBus.getStatus()} mode)`;
+      let responseText = `Message sent to ${to} (${s.messageBus.getStatus()} mode)`;
       if (finalType === "response" && type !== "response") {
         responseText += `\nNote: Auto-detected as response to ${to}'s recent message (prevents auto-loop)`;
       }
@@ -104,33 +98,33 @@ function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
             text: responseText,
           },
         ],
-        details: { messageId: sent.id, status: ctx.messageBus.getStatus(), type: finalType },
+        details: { messageId: sent.id, status: s.messageBus.getStatus(), type: finalType },
       };
     },
   };
 }
 
-function createGetInboxTool(ctx: ToolContext): ToolDefinition {
+function createGetInboxTool(ctx: ToolContext) {
   return {
     name: "get_inbox",
     label: "Get Inbox",
     description: "Get unread messages from your inbox",
-    promptSnippet: "Retrieve and read unread messages from other agents",
     parameters: Type.Object({
       from: Type.Optional(
         Type.String({ description: "Filter by sender agent name" }),
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId: string, params: any) {
+      const s = getState(ctx);
       const { from } = params;
 
       let messages: PipMessage[];
 
       if (from) {
-        messages = ctx.widgetManager.markReadFrom(from);
+        messages = s.widgetManager.markReadFrom(from);
       } else {
-        messages = ctx.widgetManager.getAll();
-        ctx.widgetManager.markAllRead();
+        messages = s.widgetManager.getAll();
+        s.widgetManager.markAllRead();
       }
 
       if (messages.length === 0) {
@@ -150,15 +144,15 @@ function createGetInboxTool(ctx: ToolContext): ToolDefinition {
   };
 }
 
-function createListAgentsTool(ctx: ToolContext): ToolDefinition {
+function createListAgentsTool(ctx: ToolContext) {
   return {
     name: "list_agents",
     label: "List Agents",
     description: "List all active agents in the pip2p network",
-    promptSnippet: "Show all active agents in the network",
     parameters: Type.Object({}),
     async execute() {
-      const otherAgents = getOtherAgents(ctx.cwd, ctx.agentName);
+      const s = getState(ctx);
+      const otherAgents = getOtherAgents(s.cwd, s.agentName);
 
       if (otherAgents.length === 0) {
         return {
@@ -172,27 +166,26 @@ function createListAgentsTool(ctx: ToolContext): ToolDefinition {
         };
       }
 
-      const lines: string[] = [`You are: ${ctx.agentName}`, "Other agents:"];
+      const lines: string[] = [`You are: ${s.agentName}`, "Other agents:"];
       for (const agent of otherAgents) {
         const role = agent.isCoordinator ? " (coordinator 👑)" : "";
         lines.push(`  - ${agent.name}${role}`);
       }
-      lines.push(`\nConnection: ${ctx.messageBus.getStatus() === "live" ? "🟢 Live" : "🟡 File Mode"}`);
+      lines.push(`\nConnection: ${s.messageBus.getStatus() === "live" ? "🟢 Live" : "🟡 File Mode"}`);
 
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
-        details: { agents: otherAgents, status: ctx.messageBus.getStatus() },
+        details: { agents: otherAgents, status: s.messageBus.getStatus() },
       };
     },
   };
 }
 
-function createReplyToAgentTool(ctx: ToolContext): ToolDefinition {
+function createReplyToAgentTool(ctx: ToolContext) {
   return {
     name: "reply_to_agent",
     label: "Reply to Agent",
     description: "Reply to a message from another agent",
-    promptSnippet: "Reply to a specific message from another agent",
     parameters: Type.Object({
       to: Type.String({ description: "Agent to reply to" }),
       message: Type.String({ description: "Reply message" }),
@@ -200,11 +193,12 @@ function createReplyToAgentTool(ctx: ToolContext): ToolDefinition {
         Type.String({ description: "Message ID being replied to" }),
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId: string, params: any) {
+      const s = getState(ctx);
       const { to, message, inReplyTo } = params;
 
       // Validate target agent exists
-      const otherAgents = getOtherAgents(ctx.cwd, ctx.agentName);
+      const otherAgents = getOtherAgents(s.cwd, s.agentName);
       const target = otherAgents.find((a) => a.name === to);
       if (!target) {
         const available = otherAgents.map((a) => a.name).join(", ") || "none";
@@ -219,16 +213,16 @@ function createReplyToAgentTool(ctx: ToolContext): ToolDefinition {
         };
       }
 
-      const sent = ctx.messageBus.sendMessage(to, message, "response", inReplyTo);
+      const sent = s.messageBus.sendMessage(to, message, "response", inReplyTo);
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `Reply sent to ${to} (${ctx.messageBus.getStatus()} mode)`,
+            text: `Reply sent to ${to} (${s.messageBus.getStatus()} mode)`,
           },
         ],
-        details: { messageId: sent.id, status: ctx.messageBus.getStatus() },
+        details: { messageId: sent.id, status: s.messageBus.getStatus() },
       };
     },
   };
