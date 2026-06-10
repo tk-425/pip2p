@@ -124,7 +124,6 @@ export class MessageBus {
    * Track an incoming message (called from onMessage handler)
    */
   trackIncoming(msg: PipMessage): void {
-    console.log(`[pip2p:track] trackIncoming: from=${msg.from}, type=${msg.type}, id=${msg.id}`);
     this.recentIncoming.set(msg.from, msg);
   }
 
@@ -140,7 +139,6 @@ export class MessageBus {
    */
   hasRecentFrom(agentName: string): PipMessage | null {
     const msg = this.recentIncoming.get(agentName);
-    console.log(`[pip2p:track] hasRecentFrom(${agentName}): found=${!!msg}, mapKeys=[${[...this.recentIncoming.keys()].join(',')}]`);
     if (!msg) return null;
     // Only consider messages from the last 5 minutes
     if (Date.now() - msg.timestamp > 5 * 60 * 1000) {

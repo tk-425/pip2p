@@ -83,13 +83,9 @@ function createSendToAgentTool(ctx: ToolContext): ToolDefinition {
       let finalType: MessageType = type;
       let finalInReplyTo: string | undefined;
       const recentFromTarget = ctx.messageBus.hasRecentFrom(to);
-      console.log(`[pip2p:safeguard] send_to_agent: to=${to}, type=${type}, hasRecent=${!!recentFromTarget}, recentId=${recentFromTarget?.id ?? 'null'}`);
       if (recentFromTarget && type !== "response") {
         finalType = "response";
         finalInReplyTo = recentFromTarget.id;
-        console.log(`[pip2p:safeguard] CONVERTED to response, inReplyTo=${finalInReplyTo}`);
-      } else {
-        console.log(`[pip2p:safeguard] NOT converted. recentFromTarget=${!!recentFromTarget}, type=${type}`);
       }
 
       const sent = ctx.messageBus.sendMessage(to, message, finalType, finalInReplyTo);
