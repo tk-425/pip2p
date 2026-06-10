@@ -1,10 +1,10 @@
 /**
- * pip2p - Pi-to-Pi Multi-Agent Communication Extension
+ * pip2p - Peer-to-Peer Multi-Agent Communication Extension
  *
- * Entry point for the pi extension.
+ * Compatible with pi and oh-my-pi (omp).
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, BeforeAgentStartEvent, BeforeAgentStartEventResult } from "@earendil-works/pi-coding-agent";
 import { MessageBus } from "./message-bus.js";
 import { WidgetManager } from "./widget-manager.js";
 import {
@@ -13,38 +13,59 @@ import {
   ensureAgentInbox,
   addAgent,
   removeAgent,
-  readServerInfo,
-  writeServerInfo,
   removeServerInfo,
-  isCoordinatorAlive,
   getCoordinator,
 } from "./agent-registry.js";
-import { PipServer } from "./server.js";
-import { createTools } from "./tools.js";
+import { createTools, type ToolContext } from "./tools.js";
 import type { ConnectionStatus } from "./types.js";
 
+
+function buildIdentityBlock(agentName: string): string {
+  return `## pip2p Agent
+
+This agent is registered as **${agentName}** on the pip2p network.
+
+Available peer communication tools:
+- **send_to_agent** — Send a task or message to another agent by name
+- **get_inbox** — Retrieve messages from your inbox (optionally filter by sender)
+- **reply_to_agent** — Reply to a specific message with threading support
+- **list_agents** — Show all active agents and their connection status
+
+When the user asks you to send a message to another agent, use the **send_to_agent** tool. Do NOT read source files or try to understand the messaging system — the tools are already available.`;
+}
 export default function (pi: ExtensionAPI) {
-  let messageBus: MessageBus | null = null;
-  let widgetManager: WidgetManager | null = null;
-  let agentName: string | null = null;
   let connectionStatus: ConnectionStatus = "file";
-  let server: PipServer | null = null;
+
+  // Mutable context shared with tools — registered at factory time,
+  // populated in session_start so omp builds its active tool set correctly.
+  const toolCtx: ToolContext = {
+    agentName: null,
+    cwd: "",
+    messageBus: null,
+    widgetManager: null,
+  };
+
+  // Register tools immediately so omp/pi includes them in the active tool set
+  const tools = createTools(toolCtx);
+  for (const tool of tools) {
+    pi.registerTool(tool as any);
+  }
 
   // Initialize on session start
   pi.on("session_start", async (_event, ctx) => {
-    // Prompt user for agent name
     if (!ctx.hasUI) return;
-    
-    const name = await ctx.ui.input("Agent name", "Enter your agent name (e.g., alice, bob):");
-    if (!name) return;
-    
-    agentName = name;
 
-    const cwd = ctx.cwd;
+    const name = await ctx.ui.input("Agent name", "Enter your agent name (e.g., alice, bob):");
+    if (!name?.trim()) return;
+
+    toolCtx.agentName = name.trim();
+    toolCtx.cwd = ctx.cwd;
+
+    const cwd = toolCtx.cwd;
 
     // Ensure directory structure
     const isNew = ensurePip2pDirs(cwd);
-    ensureAgentInbox(cwd, agentName);
+    ensureAgentInbox(cwd, toolCtx.agentName!);
 
     // If .pip2p was newly created, add to .gitignore
     if (isNew) {
@@ -52,53 +73,51 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Initialize widget manager
-    widgetManager = new WidgetManager(agentName, cwd, ctx);
+    toolCtx.widgetManager = new WidgetManager(toolCtx.agentName!, cwd, ctx);
 
     // Sync inbox from disk (pick up any messages received while offline)
-    widgetManager.syncFromDisk();
+    toolCtx.widgetManager.syncFromDisk();
 
     // Initialize message bus
-    messageBus = new MessageBus(agentName, cwd);
+    toolCtx.messageBus = new MessageBus(toolCtx.agentName!, cwd);
 
     // Handle incoming messages
-    messageBus.onMessage((msg) => {
+    toolCtx.messageBus.onMessage((msg) => {
       console.log(`[pip2p] Received message from ${msg.from}, type: ${msg.type}`);
       
       if (msg.type !== "response") {
         // Task and message types auto-inject so agent processes them
-        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\nIMPORTANT:\n1. First, work out your response and SHOW it to your user so they can see what you're sending.\n2. Then use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\nThe message content is already provided above — you do NOT need to call get_inbox.`;
-        
-        pi.sendUserMessage(instruction, { deliverAs: "followUp" });
+        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+
+        pi.sendUserMessage(instruction);
       } else {
         // Response messages go to inbox widget only
-        widgetManager?.addMessage(msg);
+        toolCtx.widgetManager?.addMessage(msg);
       }
     });
 
     // Handle status changes
-    messageBus.onStatusChange((status: ConnectionStatus) => {
+    toolCtx.messageBus.onStatusChange((status: ConnectionStatus) => {
       connectionStatus = status;
-      widgetManager?.updateAgentsWidget(status);
+      toolCtx.widgetManager?.updateAgentsWidget(status);
     });
 
     // Determine role and initialize
-    const role = await messageBus.init();
+    const role = await toolCtx.messageBus.init();
 
     // If coordinator, set up agent join/leave callbacks
-    if (role === "coordinator" && messageBus.getServer()) {
-      messageBus.getServer()!.onAgentJoin((agent) => {
-        // Update widget when a new agent joins
-        widgetManager?.updateAgentsWidget(connectionStatus);
+    if (role === "coordinator" && toolCtx.messageBus.getServer()) {
+      toolCtx.messageBus.getServer()!.onAgentJoin((agent) => {
+        toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
       });
-      messageBus.getServer()!.onAgentLeave((agentName) => {
-        // Update widget when an agent leaves
-        widgetManager?.updateAgentsWidget(connectionStatus);
+      toolCtx.messageBus.getServer()!.onAgentLeave((agentName) => {
+        toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
       });
     }
 
     // Register agent
     addAgent(cwd, {
-      name: agentName,
+      name: toolCtx.agentName!,
       pid: process.pid,
       startedAt: Date.now(),
       isCoordinator: role === "coordinator",
@@ -106,44 +125,32 @@ export default function (pi: ExtensionAPI) {
     });
 
     // Update widgets
-    connectionStatus = messageBus.getStatus();
-    widgetManager.updateAgentsWidget(connectionStatus);
+    connectionStatus = toolCtx.messageBus.getStatus();
+    toolCtx.widgetManager!.updateAgentsWidget(connectionStatus);
 
-    // Register tools with pi
-    const tools = createTools({
-      agentName,
-      cwd,
-      messageBus,
-      widgetManager,
+
+
+    // Inject identity block into system prompt
+    pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
+      return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(toolCtx.agentName!) };
     });
 
-    for (const tool of tools) {
-      pi.registerTool(tool as any);
-    }
-
-    ctx.ui.notify(
-      `pip2p: ${agentName} joined as ${role} (${connectionStatus} mode)`,
-      "info",
-    );
+    ctx.ui.notify(`pip2p: ${toolCtx.agentName} joined`, "info");
   });
-
   // Cleanup on shutdown
   pi.on("session_shutdown", async (_event, _ctx) => {
-    if (agentName) {
-      // Remove agent from registry
-      removeAgent(_ctx.cwd, agentName);
+    if (toolCtx.agentName) {
+      removeAgent(_ctx.cwd, toolCtx.agentName);
 
-      // If we're the coordinator, clean up server info
       const coordinator = getCoordinator(_ctx.cwd);
-      if (coordinator?.name === agentName) {
+      if (coordinator?.name === toolCtx.agentName) {
         removeServerInfo(_ctx.cwd);
       }
     }
 
-    // Shutdown message bus
-    messageBus?.shutdown();
+    toolCtx.messageBus?.shutdown();
 
     // Hide widgets
-    widgetManager?.hideAll();
+    toolCtx.widgetManager?.hideAll();
   });
 }
