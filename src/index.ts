@@ -66,7 +66,7 @@ export default function (pi: ExtensionAPI) {
       
       if (msg.type !== "response") {
         // Task and message types auto-inject so agent processes them
-        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\nIMPORTANT: You MUST use the send_to_agent or reply_to_agent tool to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here. The message content is already provided above — you do NOT need to call get_inbox.`;
+        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\nIMPORTANT:\n1. First, work out your response and SHOW it to your user so they can see what you're sending.\n2. Then use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\nThe message content is already provided above — you do NOT need to call get_inbox.`;
         
         pi.sendUserMessage(instruction, { deliverAs: "followUp" });
       } else {
