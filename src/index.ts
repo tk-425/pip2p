@@ -18,6 +18,7 @@ import {
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
 import type { ConnectionStatus } from "./types.js";
+import { detectSkillReference } from "./skill-detect.js";
 
 
 function buildIdentityBlock(agentName: string): string {
@@ -87,7 +88,12 @@ export default function (pi: ExtensionAPI) {
       
       if (msg.type !== "response") {
         // Task and message types auto-inject so agent processes them
-        const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+        let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+
+        const skillName = detectSkillReference(msg.content);
+        if (skillName) {
+          instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
+        }
 
         pi.sendUserMessage(instruction);
       } else {
