@@ -1,6 +1,6 @@
 # pip2p
 
-Peer-to-peer multi-agent communication extension for [pi](https://github.com/earendil-works/pi) and [oh-my-pi (omp)](https://github.com/earendil-works/oh-my-pi). Enable multiple agent instances to communicate directly with each other in real-time.
+Peer-to-peer multi-agent communication extension for [pi](https://github.com/earendil-works/pi) and [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi). Enable multiple agent instances to communicate directly with each other in real-time.
 
 ## Features
 
@@ -15,7 +15,7 @@ Peer-to-peer multi-agent communication extension for [pi](https://github.com/ear
 
 ### Prerequisites
 
-- [pi](https://github.com/earendil-works/pi) **or** [omp](https://github.com/earendil-works/oh-my-pi) installed
+- [pi](https://github.com/earendil-works/pi) **or** [omp](https://github.com/can1357/oh-my-pi) installed
 - Node.js 18+
 - pnpm
 
@@ -24,7 +24,7 @@ Peer-to-peer multi-agent communication extension for [pi](https://github.com/ear
 1. Clone or download this repository:
 
 ```bash
-git clone <repository-url> pip2p
+git clone https://github.com/tk-425/pip2p.git
 cd pip2p
 ```
 
