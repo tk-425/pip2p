@@ -4,7 +4,7 @@
  * Compatible with pi and oh-my-pi (omp).
  */
 
-import type { ExtensionAPI, BeforeAgentStartEvent, BeforeAgentStartEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, BeforeAgentStartEvent, BeforeAgentStartEventResult, SessionStartEvent, SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 import { MessageBus } from "./message-bus.js";
 import { WidgetManager } from "./widget-manager.js";
 import {
@@ -15,6 +15,7 @@ import {
   removeAgent,
   removeServerInfo,
   getCoordinator,
+  getAgentByPid,
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
 import type { ConnectionStatus } from "./types.js";
@@ -121,14 +122,34 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(tool as any);
   }
 
+  // Reasons where the P2P network should persist across the session transition.
+  // The extension is re-created by pi, so we use disk-persisted agent name to
+  // reconnect seamlessly.
+  const persistReasons: Set<string> = new Set(["new", "resume", "fork"]);
+
   // Initialize on session start
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event: SessionStartEvent, ctx) => {
     if (!ctx.hasUI) return;
 
-    const name = await ctx.ui.input("Agent name", "Enter your agent name (e.g., alice, bob):");
-    if (!name?.trim()) return;
+    // Determine agent name: on session replacement (new/resume/fork), look up
+    // by PID from agents.json. After /new the process PID stays the same.
+    let name: string | undefined;
+    if (persistReasons.has(event.reason)) {
+      const byPid = getAgentByPid(ctx.cwd, process.pid);
+      if (byPid) {
+        name = byPid.name;
+      }
+    }
 
-    toolCtx.agentName = name.trim();
+    // Fallback: ask the user (first startup or if no persisted name)
+    if (!name) {
+      const input = await ctx.ui.input("Agent name", "Enter your agent name (e.g., alice, bob):");
+      if (!input?.trim()) return;
+      name = input.trim();
+    }
+
+    // Persist agent to registry for future PID-based lookup
+    toolCtx.agentName = name;
     toolCtx.cwd = ctx.cwd;
 
     const cwd = toolCtx.cwd;
@@ -237,15 +258,13 @@ export default function (pi: ExtensionAPI) {
     // Determine role and initialize
     const role = await toolCtx.messageBus.init();
 
-    // If coordinator, set up agent join/leave callbacks
-    if (role === "coordinator" && toolCtx.messageBus.getServer()) {
-      toolCtx.messageBus.getServer()!.onAgentJoin((agent) => {
-        toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
-      });
-      toolCtx.messageBus.getServer()!.onAgentLeave((agentName) => {
-        toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
-      });
-    }
+    // Listen for agent join/leave events (from the detached server)
+    toolCtx.messageBus.onAgentJoin((_agent) => {
+      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
+    });
+    toolCtx.messageBus.onAgentLeave((_agentName) => {
+      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
+    });
 
     // Register agent
     addAgent(cwd, {
@@ -267,10 +286,21 @@ export default function (pi: ExtensionAPI) {
       return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(toolCtx.agentName!) };
     });
 
-    ctx.ui.notify(`pip2p: ${toolCtx.agentName} joined`, "info");
+    ctx.ui.notify(`pip2p: ${toolCtx.agentName} ${event.reason === "startup" ? "joined" : "reconnected"}`, "info");
   });
-  // Cleanup on shutdown
-  pi.on("session_shutdown", async (_event, _ctx) => {
+  // Cleanup on shutdown.
+  // On session replacement (new/resume/fork): disconnect client but leave the
+  // detached server running so the P2P network stays alive.
+  // On quit/reload: kill the detached server process and clean up.
+  pi.on("session_shutdown", async (event: SessionShutdownEvent, _ctx) => {
+    if (persistReasons.has(event.reason)) {
+      // Just disconnect the client — server stays alive
+      toolCtx.messageBus?.shutdown(false);
+      toolCtx.widgetManager?.hideAll();
+      return;
+    }
+
+    // Full teardown (quit / reload)
     if (toolCtx.agentName) {
       removeAgent(_ctx.cwd, toolCtx.agentName);
 
@@ -280,9 +310,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    toolCtx.messageBus?.shutdown();
-
-    // Hide widgets
+    toolCtx.messageBus?.shutdown(true);
     toolCtx.widgetManager?.hideAll();
   });
 }
