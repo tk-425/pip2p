@@ -174,7 +174,6 @@ export default function (pi: ExtensionAPI) {
 
     // Handle incoming messages
     toolCtx.messageBus.onMessage((msg) => {
-      console.log(`[pip2p] Received message from ${msg.from}, type: ${msg.type}`);
 
       if (msg.type === "invoke-skill") {
         const skillName = msg.skillInvocation?.skillName?.trim();
