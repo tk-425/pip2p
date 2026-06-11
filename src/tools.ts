@@ -74,22 +74,22 @@ function createSendToAgentTool(ctx: ToolContext) {
         };
       }
 
-      // Smart reply detection: if target recently sent us a task/message (not a response), treat this as a response
       let finalType: MessageType = type;
       let finalInReplyTo: string | undefined;
+      let finalInvokeThreadId: string | undefined;
       const recentFromTarget = s.messageBus.hasRecentFrom(to);
-      if (
-        recentFromTarget &&
-        (recentFromTarget.type === "task" || recentFromTarget.type === "message" || recentFromTarget.type === "invoke-skill") &&
-        type !== "response"
-      ) {
-        // Only auto-convert if the recent incoming was a conversational task/message.
-        // Structured invoke-skill requests stay on their own protocol path.
-        finalType = "response";
-        finalInReplyTo = recentFromTarget.id;
+      if (recentFromTarget && type !== "response") {
+        if (recentFromTarget.type === "task" || recentFromTarget.type === "message" || recentFromTarget.type === "invoke-skill") {
+          finalType = "response";
+          finalInReplyTo = recentFromTarget.id;
+        } else if (recentFromTarget.type === "response" && recentFromTarget.invokeThreadId) {
+          finalType = "response";
+          finalInReplyTo = recentFromTarget.id;
+          finalInvokeThreadId = recentFromTarget.invokeThreadId;
+        }
       }
 
-      const sent = s.messageBus.sendMessage(to, message, finalType, finalInReplyTo);
+      const sent = s.messageBus.sendMessage(to, message, finalType, finalInReplyTo, undefined, finalInvokeThreadId);
 
       let responseText = `Message sent to ${to} (${s.messageBus.getStatus()} mode)`;
       if (finalType === "response" && type !== "response") {
@@ -113,15 +113,20 @@ function createInvokeSkillTool(ctx: ToolContext) {
   return {
     name: "invoke_skill_on_agent",
     label: "Invoke Skill on Agent",
-    description: "Send a structured skill invocation request to another agent",
+    description: "Send a structured skill invocation request to another agent. Defaults to interactive mode unless replyMode is explicitly set to auto.",
     parameters: Type.Object({
       to: Type.String({ description: "Target agent name" }),
       skill: Type.String({ description: "Local skill name to invoke on the target agent" }),
       args: Type.Optional(Type.String({ description: "Arguments to append after the skill command" })),
+      replyMode: Type.Optional(
+        Type.Union([Type.Literal("auto"), Type.Literal("interactive")], {
+          description: "Reply behavior: auto forwards the final result, interactive allows follow-up questions and manual continuation. Defaults to interactive.",
+        }),
+      ),
     }),
     async execute(_toolCallId: string, params: any) {
+      const { to, skill, args, replyMode = "interactive" } = params;
       const s = getState(ctx);
-      const { to, skill, args } = params;
 
       const otherAgents = getOtherAgents(s.cwd, s.agentName);
       const target = otherAgents.find((a) => a.name === to);
@@ -146,14 +151,20 @@ function createInvokeSkillTool(ctx: ToolContext) {
         {
           skillName: skill,
           args,
+          replyMode,
         },
       );
+
+      const responseText =
+        replyMode === "auto"
+          ? `Structured skill invocation sent to ${to} in auto mode. The final result will arrive in your inbox when complete — do NOT poll get_inbox. Stop and wait for the user to ask for results.`
+          : `Structured skill invocation sent to ${to} in interactive mode. The target agent may ask follow-up questions or continue the interaction manually; wait for the user to ask before checking get_inbox.`;
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `Structured skill invocation sent to ${to}. The response will arrive in your inbox when complete — do NOT poll get_inbox. Stop and wait for the user to ask for results.`,
+            text: responseText,
           },
         ],
         details: {

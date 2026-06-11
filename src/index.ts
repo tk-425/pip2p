@@ -55,10 +55,12 @@ When the user asks you to send a message to another agent, use the **send_to_age
 When the user asks you to invoke a local skill on another agent, use the **invoke_skill_on_agent** tool.
 Do NOT read source files or try to understand the messaging system — the tools are already available.`;
 }
-type PendingSkillReply = {
-  from: string;
-  inReplyTo: string;
+type ActiveInvokeSession = {
+  requester: string;
+  requestMessageId: string;
   skillName: string;
+  mode: "auto" | "interactive";
+  threadId: string;
 };
 
 function extractAssistantText(message: { content?: Array<{ type?: string; text?: string }> }): string {
@@ -84,10 +86,10 @@ export default function (pi: ExtensionAPI) {
   };
 
   // Register tools immediately so omp/pi includes them in the active tool set
-  let pendingSkillReply: PendingSkillReply | null = null;
+  let activeInvokeSession: ActiveInvokeSession | null = null;
 
   pi.on("message_end", (event) => {
-    if (event.message.role !== "assistant" || !pendingSkillReply || !toolCtx.messageBus) {
+    if (event.message.role !== "assistant" || !activeInvokeSession || !toolCtx.messageBus) {
       return;
     }
 
@@ -102,12 +104,17 @@ export default function (pi: ExtensionAPI) {
     }
 
     toolCtx.messageBus.sendMessage(
-      pendingSkillReply.from,
+      activeInvokeSession.requester,
       text,
       "response",
-      pendingSkillReply.inReplyTo,
+      activeInvokeSession.requestMessageId,
+      undefined,
+      activeInvokeSession.threadId,
     );
-    pendingSkillReply = null;
+
+    if (activeInvokeSession.mode === "auto") {
+      activeInvokeSession = null;
+    }
   });
   const tools = createTools(toolCtx);
   for (const tool of tools) {
@@ -174,14 +181,17 @@ export default function (pi: ExtensionAPI) {
         }
 
         try {
-          pendingSkillReply = {
-            from: msg.from,
-            inReplyTo: msg.id,
+          const mode = msg.skillInvocation?.replyMode === "auto" ? "auto" : "interactive";
+          activeInvokeSession = {
+            requester: msg.from,
+            requestMessageId: msg.id,
             skillName,
+            mode,
+            threadId: msg.id,
           };
           pi.sendUserMessage(skillResult.command);
         } catch (err) {
-          pendingSkillReply = null;
+          activeInvokeSession = null;
           toolCtx.messageBus?.sendMessage(
             msg.from,
             `Failed to invoke skill: local dispatch error for ${skillName} — ${err instanceof Error ? err.message : String(err)}`,
@@ -192,20 +202,30 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (msg.type !== "response") {
-        // Task and message types auto-inject so agent processes them
-        let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
-
-        const skillName = detectSkillReference(msg.content);
-        if (skillName) {
-          instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
+      if (msg.type === "response") {
+        if (
+          activeInvokeSession &&
+          activeInvokeSession.mode === "interactive" &&
+          msg.invokeThreadId === activeInvokeSession.threadId
+        ) {
+          pi.sendUserMessage(msg.content);
+          return;
         }
 
-        pi.sendUserMessage(instruction);
-      } else {
         // Response messages go to inbox widget only
         toolCtx.widgetManager?.addMessage(msg);
+        return;
       }
+
+      // Task and message types auto-inject so agent processes them
+      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+
+      const skillName = detectSkillReference(msg.content);
+      if (skillName) {
+        instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
+      }
+
+      pi.sendUserMessage(instruction);
     });
 
     // Handle status changes
