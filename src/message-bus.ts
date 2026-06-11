@@ -69,6 +69,7 @@ export class MessageBus {
     type: MessageType = "task",
     inReplyTo?: string,
     skillInvocation?: PipMessage["skillInvocation"],
+    invokeThreadId?: string,
   ): PipMessage {
     const message: PipMessage = {
       id: crypto.randomUUID(),
@@ -80,6 +81,7 @@ export class MessageBus {
       type,
       inReplyTo,
       skillInvocation,
+      invokeThreadId,
     };
 
     // Track outgoing message
