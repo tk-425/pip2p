@@ -8,9 +8,9 @@ Peer-to-peer multi-agent communication extension for [pi](https://github.com/ear
 - **Coordinator/Worker architecture** - First agent becomes coordinator, others connect as workers
 - **Automatic failover** - If coordinator dies, a worker automatically takes over
 - **Smart reply detection** - Prevents message loops by auto-detecting responses
+- **Structured skill invocation** - Ask another agent to run a local skill with interactive or auto reply behavior
 - **Widget integration** - Live inbox notifications and agent status in your terminal
 - **Project-scoped** - Each project has its own isolated agent network
-
 ## Installation
 
 ### Prerequisites
@@ -80,13 +80,19 @@ pi    # or: omp
 
 The first agent becomes the coordinator, and subsequent agents join as workers.
 
-### Sending Messages
+### Sending Messages And Invoking Skills
 
 Use the provided tools to communicate:
 
 ```
 # Send a task to another agent
 send_to_agent --to bob --message "Please refactor the auth module"
+
+# Invoke a local skill on another agent (interactive by default)
+invoke_skill_on_agent --to bob --skill devflow-commit
+
+# Invoke a one-shot skill and auto-return the final result
+invoke_skill_on_agent --to bob --skill firecrawl --args "search latest Tesla stock price" --reply-mode auto
 
 # Check your inbox
 get_inbox
@@ -119,6 +125,25 @@ list_agents
 - **message** - General communication
 - **response** - Replies (shown in inbox widget only)
 
+### Skill Invocation Modes
+
+`invoke_skill_on_agent` supports two reply modes:
+
+- **interactive** (default) — best for skills that ask follow-up questions, request confirmation, or need multiple turns. The target agent's messages are relayed back through the inbox thread.
+- **auto** — best for one-shot skills. The target agent's final assistant message is automatically forwarded back to the sender inbox.
+
+Examples:
+
+```bash
+# Default interactive mode
+invoke_skill_on_agent --to bob --skill devflow-commit
+
+# Explicit interactive mode
+invoke_skill_on_agent --to bob --skill devflow-commit --reply-mode interactive
+
+# Explicit auto mode
+invoke_skill_on_agent --to bob --skill firecrawl --args "search latest Apple stock price" --reply-mode auto
+```
 ### Project Structure
 
 ```
@@ -165,6 +190,14 @@ Show all active agents and connection status.
 
 ```bash
 list_agents
+```
+
+### invoke_skill_on_agent
+
+Invoke a local skill on another agent.
+
+```bash
+invoke_skill_on_agent --to <agent-name> --skill <skill-name> [--args "<skill args>"] [--reply-mode interactive|auto]
 ```
 
 ## Configuration
@@ -258,6 +291,11 @@ pi    # or: omp
 - Check connection mode (should be 🟢 Live)
 - Verify agent names are correct
 - Check `.pip2p/agents.json` for registered agents
+
+### Skill invocation differences between pi and omp
+
+- **pi** - Structured cross-agent skill invocation works, including interactive relay and auto final-result forwarding.
+- **omp** - Agent-to-agent messaging and inbox relay work, but native skill execution from pip2p is currently limited by OMP's public extension API. OMP supports `/skill:<name>` natively in its TUI, but pip2p cannot currently reach the same native dispatch seam through the extension API alone.
 
 ### Extension not loading
 
