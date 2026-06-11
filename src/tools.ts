@@ -33,6 +33,7 @@ function getState(ctx: ToolContext): ReadyToolContext {
 export function createTools(toolCtx: ToolContext) {
   return [
     createSendToAgentTool(toolCtx),
+    createInvokeSkillTool(toolCtx),
     createGetInboxTool(toolCtx),
     createListAgentsTool(toolCtx),
     createReplyToAgentTool(toolCtx),
@@ -77,9 +78,13 @@ function createSendToAgentTool(ctx: ToolContext) {
       let finalType: MessageType = type;
       let finalInReplyTo: string | undefined;
       const recentFromTarget = s.messageBus.hasRecentFrom(to);
-      if (recentFromTarget && recentFromTarget.type !== "response" && type !== "response") {
-        // Only auto-convert if the recent incoming was a task/message (active request from them)
-        // If their last message was a response, the conversation round is done — new messages are new tasks
+      if (
+        recentFromTarget &&
+        (recentFromTarget.type === "task" || recentFromTarget.type === "message") &&
+        type !== "response"
+      ) {
+        // Only auto-convert if the recent incoming was a conversational task/message.
+        // Structured invoke-skill requests stay on their own protocol path.
         finalType = "response";
         finalInReplyTo = recentFromTarget.id;
       }
@@ -99,6 +104,64 @@ function createSendToAgentTool(ctx: ToolContext) {
           },
         ],
         details: { messageId: sent.id, status: s.messageBus.getStatus(), type: finalType },
+      };
+    },
+  };
+}
+
+function createInvokeSkillTool(ctx: ToolContext) {
+  return {
+    name: "invoke_skill_on_agent",
+    label: "Invoke Skill on Agent",
+    description: "Send a structured skill invocation request to another agent",
+    parameters: Type.Object({
+      to: Type.String({ description: "Target agent name" }),
+      skill: Type.String({ description: "Local skill name to invoke on the target agent" }),
+      args: Type.Optional(Type.String({ description: "Arguments to append after the skill command" })),
+    }),
+    async execute(_toolCallId: string, params: any) {
+      const s = getState(ctx);
+      const { to, skill, args } = params;
+
+      const otherAgents = getOtherAgents(s.cwd, s.agentName);
+      const target = otherAgents.find((a) => a.name === to);
+      if (!target) {
+        const available = otherAgents.map((a) => a.name).join(", ") || "none";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Agent "${to}" not found. Available agents: ${available}`,
+            },
+          ],
+          details: { error: "agent_not_found" },
+        };
+      }
+
+      const sent = s.messageBus.sendMessage(
+        to,
+        "Structured skill invocation request",
+        "invoke-skill",
+        undefined,
+        {
+          skillName: skill,
+          args,
+        },
+      );
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Structured skill invocation sent to ${to} (${s.messageBus.getStatus()} mode)`,
+          },
+        ],
+        details: {
+          messageId: sent.id,
+          status: s.messageBus.getStatus(),
+          type: sent.type,
+          skillInvocation: sent.skillInvocation,
+        },
       };
     },
   };
