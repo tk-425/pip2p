@@ -104,8 +104,12 @@ export default function (pi: ExtensionAPI) {
         }
 
         const skillCommand = args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
+        const instruction =
+          `[pip2p] ${msg.from} invoked the "${skillName}" skill on you.${args ? ` Args: ${args}` : ""}\n` +
+          `Run the skill, show the results, then send them back to ${msg.from} using send_to_agent.\n\n` +
+          `Skill command: ${skillCommand}`;
         try {
-          pi.sendUserMessage(skillCommand);
+          pi.sendUserMessage(instruction);
         } catch (err) {
           toolCtx.messageBus?.sendMessage(
             msg.from,
