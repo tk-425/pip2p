@@ -9,6 +9,7 @@ import type {
   AgentInfo,
   PipMessage,
 } from "./types.js";
+import { readServerInfo } from "./agent-registry.js";
 
 export type ClientStatus = "connecting" | "connected" | "disconnected";
 
@@ -24,10 +25,13 @@ export class PipClient {
   private onRegistryCallback: ((agents: AgentInfo[]) => void) | null = null;
   private onStatusChangeCallback: ((status: ClientStatus) => void) | null = null;
   private onDisconnectCallback: (() => void) | null = null;
+  private onAgentJoinCallback: ((agent: AgentInfo) => void) | null = null;
+  private onAgentLeaveCallback: ((agentName: string) => void) | null = null;
 
   constructor(
     private agentName: string,
     private pid: number,
+    private cwd: string,
   ) {}
 
   /**
@@ -66,7 +70,7 @@ export class PipClient {
         this.status = "disconnected";
         this.notifyStatusChange();
         this.onDisconnectCallback?.();
-        this.tryReconnect(port);
+        this.tryReconnect();
       });
 
       this.ws.on("error", () => {
@@ -75,7 +79,7 @@ export class PipClient {
     } catch {
       this.status = "disconnected";
       this.notifyStatusChange();
-      this.tryReconnect(port);
+      this.tryReconnect();
     }
   }
 
@@ -137,6 +141,14 @@ export class PipClient {
     this.onDisconnectCallback = callback;
   }
 
+  onAgentJoin(callback: (agent: AgentInfo) => void): void {
+    this.onAgentJoinCallback = callback;
+  }
+
+  onAgentLeave(callback: (agentName: string) => void): void {
+    this.onAgentLeaveCallback = callback;
+  }
+
   // --- Private ---
 
   private handleServerMessage(msg: WsServerMessage): void {
@@ -148,15 +160,20 @@ export class PipClient {
         this.onMessageCallback?.(msg.payload);
         break;
       case "agent_joined":
-        // Registry will be sent separately
+        this.onAgentJoinCallback?.(msg.agent);
         break;
       case "agent_left":
-        // Registry will be sent separately
+        this.onAgentLeaveCallback?.(msg.agent);
         break;
     }
   }
 
-  private tryReconnect(port: number): void {
+  /**
+   * Attempt reconnection by re-reading server info for the current port.
+   * This handles the case where the coordinator restarted on a new port
+   * after a session replacement (/new, /resume, /fork).
+   */
+  private tryReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       return;
     }
@@ -165,7 +182,14 @@ export class PipClient {
     const delay = this.reconnectDelay * Math.min(this.reconnectAttempts, 5);
 
     this.reconnectTimer = setTimeout(() => {
-      this.connect(port);
+      // Re-read server info to pick up new port after coordinator restart
+      const serverInfo = readServerInfo(this.cwd);
+      if (serverInfo) {
+        this.connect(serverInfo.port);
+      } else {
+        // No server info yet, retry later
+        this.tryReconnect();
+      }
     }, delay);
   }
 

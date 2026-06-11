@@ -138,6 +138,34 @@ export function removeServerInfo(cwd: string): void {
   }
 }
 
+// --- PID-based Agent Lookup ---
+
+export function getAgentByPid(cwd: string, pid: number): AgentInfo | undefined {
+  const registry = readAgentRegistry(cwd);
+  return registry.agents.find((a) => a.pid === pid);
+}
+
+// --- Last Agent Persistence (per-PID) ---
+//
+// Multiple agents share the same .pip2p/ directory, so we can't use a single
+// .last-agent file. Instead we look up by PID from agents.json.
+// The functions below are kept for backward compatibility but the PID-based
+// lookup is preferred.
+
+const LAST_AGENT_FILE = ".last-agent";
+
+export function saveLastAgent(cwd: string, agentName: string): void {
+  ensurePip2pDirs(cwd);
+  const filePath = path.join(getPip2pDir(cwd), LAST_AGENT_FILE);
+  fs.writeFileSync(filePath, agentName, "utf-8");
+}
+
+export function readLastAgent(cwd: string): string | null {
+  const filePath = path.join(getPip2pDir(cwd), LAST_AGENT_FILE);
+  if (!fs.existsSync(filePath)) return null;
+  return fs.readFileSync(filePath, "utf-8").trim() || null;
+}
+
 export function isCoordinatorAlive(cwd: string): boolean {
   const serverInfo = readServerInfo(cwd);
   if (!serverInfo) return false;

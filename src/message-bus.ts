@@ -1,21 +1,32 @@
 /**
  * Message Bus - dual-mode messaging (WebSocket + file-based fallback)
+ *
+ * The WebSocket server runs as a detached child process (server-runner.mjs)
+ * so it survives session replacement (/new, /resume, /fork). All agents,
+ * including the coordinator, connect as clients.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { PipServer } from "./server.js";
+import * as url from "node:url";
+import * as child_process from "node:child_process";
 import { PipClient, type ClientStatus } from "./client.js";
 import { FileWatcher, type MessageHandler } from "./file-watcher.js";
-import { getInboxDir, readServerInfo, writeServerInfo, isCoordinatorAlive } from "./agent-registry.js";
-import type { PipMessage, ConnectionStatus, MessageType } from "./types.js";
+import {
+  getInboxDir,
+  readServerInfo,
+  writeServerInfo,
+  isCoordinatorAlive,
+  removeServerInfo,
+} from "./agent-registry.js";
+import type { PipMessage, ConnectionStatus, MessageType, AgentInfo } from "./types.js";
 
 export type StatusChangeHandler = (status: ConnectionStatus) => void;
 
 export class MessageBus {
-  private server: PipServer | null = null;
   private client: PipClient | null = null;
   private fileWatcher: FileWatcher | null = null;
+  private serverProcess: child_process.ChildProcess | null = null;
   private status: ConnectionStatus = "file";
   private statusHandlers: StatusChangeHandler[] = [];
   private messageHandlers: MessageHandler[] = [];
@@ -27,6 +38,10 @@ export class MessageBus {
   // Track processed message IDs to prevent duplicates
   private processedMessageIds: Set<string> = new Set();
 
+  // Callbacks for agent join/leave (forwarded from client)
+  private agentJoinCallbacks: ((agent: AgentInfo) => void)[] = [];
+  private agentLeaveCallbacks: ((agentName: string) => void)[] = [];
+
   constructor(
     private agentName: string,
     private cwd: string,
@@ -34,8 +49,8 @@ export class MessageBus {
 
   /**
    * Initialize the message bus.
-   * If coordinator is alive, connect as client.
-   * Otherwise, start as coordinator/server.
+   * If a server is already running, connect as client.
+   * Otherwise, spawn the detached server and connect as client.
    */
   async init(): Promise<"coordinator" | "worker"> {
     // Ensure inbox directory exists
@@ -45,9 +60,8 @@ export class MessageBus {
     // Always start file watcher as fallback
     this.startFileWatcher();
 
-    // Check if coordinator is alive
+    // Check if server is already running
     if (isCoordinatorAlive(this.cwd)) {
-      // Connect as worker
       const serverInfo = readServerInfo(this.cwd);
       if (serverInfo) {
         this.startClient(serverInfo.port);
@@ -55,8 +69,8 @@ export class MessageBus {
       }
     }
 
-    // Start as coordinator
-    await this.startServer();
+    // Spawn the detached server and connect as coordinator
+    await this.spawnServer();
     return "coordinator";
   }
 
@@ -85,17 +99,11 @@ export class MessageBus {
     };
 
     // Track outgoing message
-    this.trackOutgoing(message);
+    this.recentOutgoing.set(to, message);
 
     if (this.status === "live") {
-      // Live mode: use WebSocket only
-      if (this.server) {
-        // We're the coordinator, send via server
-        this.server.sendTo(to, message);
-      } else if (this.client) {
-        // We're a worker, send via client
-        this.client.sendTo(to, message);
-      }
+      // Live mode: send via WebSocket client
+      this.client?.sendTo(to, message);
     } else {
       // File mode: write to file
       this.writeToFile(to, message);
@@ -126,10 +134,17 @@ export class MessageBus {
   }
 
   /**
-   * Get the server instance (only available if this agent is the coordinator)
+   * Register a handler for agent join events
    */
-  getServer(): PipServer | null {
-    return this.server;
+  onAgentJoin(handler: (agent: AgentInfo) => void): void {
+    this.agentJoinCallbacks.push(handler);
+  }
+
+  /**
+   * Register a handler for agent leave events
+   */
+  onAgentLeave(handler: (agentName: string) => void): void {
+    this.agentLeaveCallbacks.push(handler);
   }
 
   /**
@@ -161,39 +176,69 @@ export class MessageBus {
   }
 
   /**
-   * Shutdown the message bus
+   * Shutdown the message bus.
+   * @param killServer - If true, kill the detached server process (used on quit/reload).
    */
-  shutdown(): void {
+  shutdown(killServer = false): void {
     this.fileWatcher?.stop();
     this.client?.disconnect();
-    this.server?.stop();
+    if (killServer && this.serverProcess) {
+      this.serverProcess.kill("SIGTERM");
+      this.serverProcess = null;
+    }
   }
 
   // --- Private ---
 
-  private async startServer(): Promise<void> {
-    this.server = new PipServer();
-    const port = await PipServer.findFreePort();
-    await this.server.start(port);
+  /**
+   * Spawn the detached server-runner.mjs process and wait for it to be ready.
+   * Then connect as a client.
+   */
+  private async spawnServer(): Promise<void> {
+    const thisDir = path.dirname(url.fileURLToPath(import.meta.url));
+    const runnerPath = path.join(thisDir, "server-runner.mjs");
 
-    // Write server info
-    writeServerInfo(this.cwd, {
-      port,
-      coordinator: this.agentName,
-      pid: process.pid,
-      startedAt: Date.now(),
+    this.serverProcess = child_process.spawn(
+      process.execPath,
+      [runnerPath, "--cwd", this.cwd, "--coordinator", this.agentName, "--coordinator-pid", String(process.pid)],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
+    this.serverProcess.unref();
+
+    // Wait for server.json to appear (server writes it once listening)
+    const port = await this.waitForServerInfo();
+
+    // Connect to our own server as a client
+    this.startClient(port);
+  }
+
+  /**
+   * Wait for the server runner to write server.json, then return the port.
+   */
+  private waitForServerInfo(maxWaitMs = 5000): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const startTime = Date.now();
+      const poll = () => {
+        const info = readServerInfo(this.cwd);
+        if (info) {
+          resolve(info.port);
+          return;
+        }
+        if (Date.now() - startTime > maxWaitMs) {
+          reject(new Error("Timed out waiting for server info"));
+          return;
+        }
+        setTimeout(poll, 100);
+      };
+      poll();
     });
-
-    // Handle incoming messages from other agents
-    this.server.onMessage((msg) => {
-      this.handleIncomingMessage(msg);
-    });
-
-    this.setStatus("live");
   }
 
   private startClient(port: number): void {
-    this.client = new PipClient(this.agentName, process.pid);
+    this.client = new PipClient(this.agentName, process.pid, this.cwd);
 
     this.client.onMessage((msg) => {
       this.handleIncomingMessage(msg);
@@ -207,9 +252,17 @@ export class MessageBus {
       }
     });
 
+    this.client.onAgentJoin((agent: AgentInfo) => {
+      for (const cb of this.agentJoinCallbacks) cb(agent);
+    });
+
+    this.client.onAgentLeave((agentName: string) => {
+      for (const cb of this.agentLeaveCallbacks) cb(agentName);
+    });
+
     this.client.onDisconnect(() => {
-      // Try to take over as coordinator if coordinator died
-      this.tryTakeover();
+      // Don't try takeover — the detached server handles its own lifecycle.
+      // If the server died, file watcher is the fallback.
     });
 
     this.client.connect(port);
@@ -263,25 +316,6 @@ export class MessageBus {
     this.status = status;
     for (const handler of this.statusHandlers) {
       handler(status);
-    }
-  }
-
-  private async tryTakeover(): Promise<void> {
-    // Check if coordinator is actually dead
-    if (isCoordinatorAlive(this.cwd)) return;
-
-    try {
-      // Stop file watcher temporarily
-      this.fileWatcher?.stop();
-
-      // Start server
-      await this.startServer();
-
-      // Restart file watcher
-      this.startFileWatcher();
-    } catch {
-      // Another agent took over, restart file watcher
-      this.startFileWatcher();
     }
   }
 }
