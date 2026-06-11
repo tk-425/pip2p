@@ -20,6 +20,24 @@ import { createTools, type ToolContext } from "./tools.js";
 import type { ConnectionStatus } from "./types.js";
 import { detectSkillReference } from "./skill-detect.js";
 
+function buildSkillCommand(
+  pi: ExtensionAPI,
+  skillName: string,
+  args: string | undefined,
+): { ok: true; command: string } | { ok: false; error: string } {
+  const slashCommands = pi.getCommands();
+  const skillCommand = slashCommands.find(
+    (command) => command.source === "skill" && (command.name === `skill:${skillName}` || command.name === skillName),
+  );
+
+  if (!skillCommand) {
+    return { ok: false, error: `skill "${skillName}" is not available in this session` };
+  }
+
+  const command = args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
+  return { ok: true, command };
+}
+
 
 function buildIdentityBlock(agentName: string): string {
   return `## pip2p Agent
@@ -37,6 +55,22 @@ When the user asks you to send a message to another agent, use the **send_to_age
 When the user asks you to invoke a local skill on another agent, use the **invoke_skill_on_agent** tool.
 Do NOT read source files or try to understand the messaging system — the tools are already available.`;
 }
+type PendingSkillReply = {
+  from: string;
+  inReplyTo: string;
+  skillName: string;
+};
+
+function extractAssistantText(message: { content?: Array<{ type?: string; text?: string }> }): string {
+  const text = (message.content ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text!.trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+
+  return text;
+}
 export default function (pi: ExtensionAPI) {
   let connectionStatus: ConnectionStatus = "file";
 
@@ -50,6 +84,31 @@ export default function (pi: ExtensionAPI) {
   };
 
   // Register tools immediately so omp/pi includes them in the active tool set
+  let pendingSkillReply: PendingSkillReply | null = null;
+
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "assistant" || !pendingSkillReply || !toolCtx.messageBus) {
+      return;
+    }
+
+    const hasToolCall = event.message.content.some((part) => part.type === "toolCall");
+    if (hasToolCall) {
+      return;
+    }
+
+    const text = extractAssistantText(event.message as { content?: Array<{ type?: string; text?: string }> });
+    if (!text) {
+      return;
+    }
+
+    toolCtx.messageBus.sendMessage(
+      pendingSkillReply.from,
+      text,
+      "response",
+      pendingSkillReply.inReplyTo,
+    );
+    pendingSkillReply = null;
+  });
   const tools = createTools(toolCtx);
   for (const tool of tools) {
     pi.registerTool(tool as any);
@@ -103,14 +162,26 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        const skillCommand = args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
-        const instruction =
-          `[pip2p] ${msg.from} invoked the "${skillName}" skill on you.${args ? ` Args: ${args}` : ""}\n` +
-          `Run the skill, show the results, then send them back to ${msg.from} using send_to_agent.\n\n` +
-          `Skill command: ${skillCommand}`;
+        const skillResult = buildSkillCommand(pi, skillName, args);
+        if (!skillResult.ok) {
+          toolCtx.messageBus?.sendMessage(
+            msg.from,
+            `Failed to invoke skill: ${skillResult.error}`,
+            "response",
+            msg.id,
+          );
+          return;
+        }
+
         try {
-          pi.sendUserMessage(instruction);
+          pendingSkillReply = {
+            from: msg.from,
+            inReplyTo: msg.id,
+            skillName,
+          };
+          pi.sendUserMessage(skillResult.command);
         } catch (err) {
+          pendingSkillReply = null;
           toolCtx.messageBus?.sendMessage(
             msg.from,
             `Failed to invoke skill: local dispatch error for ${skillName} — ${err instanceof Error ? err.message : String(err)}`,
