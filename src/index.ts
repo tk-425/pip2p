@@ -114,9 +114,7 @@ export default function (pi: ExtensionAPI) {
       activeInvokeSession.threadId,
     );
 
-    if (activeInvokeSession.mode === "auto") {
-      activeInvokeSession = null;
-    }
+    activeInvokeSession = null;
   });
   const tools = createTools(toolCtx);
   for (const tool of tools) {
@@ -224,15 +222,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (msg.type === "response") {
-        if (
-          activeInvokeSession &&
-          activeInvokeSession.mode === "interactive" &&
-          msg.invokeThreadId === activeInvokeSession.threadId
-        ) {
-          pi.sendUserMessage(msg.content);
-          return;
-        }
-
         // Response messages go to inbox widget only
         toolCtx.widgetManager?.addMessage(msg);
         return;

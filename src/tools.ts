@@ -157,8 +157,8 @@ function createInvokeSkillTool(ctx: ToolContext) {
 
       const responseText =
         replyMode === "auto"
-          ? `Structured skill invocation sent to ${to} in auto mode. The final result will arrive in your inbox when complete — do NOT poll get_inbox. Stop and wait for the user to ask for results.`
-          : `Structured skill invocation sent to ${to} in interactive mode. The target agent may ask follow-up questions or continue the interaction manually; wait for the user to ask before checking get_inbox.`;
+          ? `Structured skill invocation sent to ${to} in auto mode. The final result will arrive in your inbox when complete.`
+          : `Structured skill invocation sent to ${to} in interactive mode. Any follow-up replies and final results will arrive in your inbox.`;
 
       return {
         content: [
