@@ -63,7 +63,13 @@ export class MessageBus {
   /**
    * Send a message to another agent
    */
-  sendMessage(to: string, content: string, type: MessageType = "task", inReplyTo?: string): PipMessage {
+  sendMessage(
+    to: string,
+    content: string,
+    type: MessageType = "task",
+    inReplyTo?: string,
+    skillInvocation?: PipMessage["skillInvocation"],
+  ): PipMessage {
     const message: PipMessage = {
       id: crypto.randomUUID(),
       from: this.agentName,
@@ -73,6 +79,7 @@ export class MessageBus {
       read: false,
       type,
       inReplyTo,
+      skillInvocation,
     };
 
     // Track outgoing message

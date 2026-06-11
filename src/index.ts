@@ -28,11 +28,14 @@ This agent is registered as **${agentName}** on the pip2p network.
 
 Available peer communication tools:
 - **send_to_agent** — Send a task or message to another agent by name
+- **invoke_skill_on_agent** — Send a structured local skill invocation request to another agent
 - **get_inbox** — Retrieve messages from your inbox (optionally filter by sender)
 - **reply_to_agent** — Reply to a specific message with threading support
 - **list_agents** — Show all active agents and their connection status
 
-When the user asks you to send a message to another agent, use the **send_to_agent** tool. Do NOT read source files or try to understand the messaging system — the tools are already available.`;
+When the user asks you to send a message to another agent, use the **send_to_agent** tool.
+When the user asks you to invoke a local skill on another agent, use the **invoke_skill_on_agent** tool.
+Do NOT read source files or try to understand the messaging system — the tools are already available.`;
 }
 export default function (pi: ExtensionAPI) {
   let connectionStatus: ConnectionStatus = "file";
@@ -85,7 +88,35 @@ export default function (pi: ExtensionAPI) {
     // Handle incoming messages
     toolCtx.messageBus.onMessage((msg) => {
       console.log(`[pip2p] Received message from ${msg.from}, type: ${msg.type}`);
-      
+
+      if (msg.type === "invoke-skill") {
+        const skillName = msg.skillInvocation?.skillName?.trim();
+        const args = msg.skillInvocation?.args?.trim();
+
+        if (!skillName) {
+          toolCtx.messageBus?.sendMessage(
+            msg.from,
+            `Failed to invoke skill: missing or malformed skill name in invoke-skill request ${msg.id}.`,
+            "response",
+            msg.id,
+          );
+          return;
+        }
+
+        const skillCommand = args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
+        try {
+          pi.sendUserMessage(skillCommand);
+        } catch (err) {
+          toolCtx.messageBus?.sendMessage(
+            msg.from,
+            `Failed to invoke skill: local dispatch error for ${skillName} — ${err instanceof Error ? err.message : String(err)}`,
+            "response",
+            msg.id,
+          );
+        }
+        return;
+      }
+
       if (msg.type !== "response") {
         // Task and message types auto-inject so agent processes them
         let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;

@@ -36,3 +36,4 @@ AGENTS.md
 .pip2p/
 .codegraph/
 graphify-out/
+.firecrawl/

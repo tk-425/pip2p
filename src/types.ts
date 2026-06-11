@@ -22,7 +22,12 @@ export interface ServerInfo {
   startedAt: number;
 }
 
-export type MessageType = "task" | "response" | "message";
+export type MessageType = "task" | "response" | "message" | "invoke-skill";
+
+export interface SkillInvocation {
+  skillName: string;
+  args?: string;
+}
 
 export interface PipMessage {
   id: string;
@@ -33,6 +38,7 @@ export interface PipMessage {
   read: boolean;
   type: MessageType;
   inReplyTo?: string;
+  skillInvocation?: SkillInvocation;
 }
 
 export type ConnectionStatus = "live" | "file";
