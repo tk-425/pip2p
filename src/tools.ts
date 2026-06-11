@@ -80,7 +80,7 @@ function createSendToAgentTool(ctx: ToolContext) {
       const recentFromTarget = s.messageBus.hasRecentFrom(to);
       if (
         recentFromTarget &&
-        (recentFromTarget.type === "task" || recentFromTarget.type === "message") &&
+        (recentFromTarget.type === "task" || recentFromTarget.type === "message" || recentFromTarget.type === "invoke-skill") &&
         type !== "response"
       ) {
         // Only auto-convert if the recent incoming was a conversational task/message.
@@ -153,7 +153,7 @@ function createInvokeSkillTool(ctx: ToolContext) {
         content: [
           {
             type: "text" as const,
-            text: `Structured skill invocation sent to ${to} (${s.messageBus.getStatus()} mode)`,
+            text: `Structured skill invocation sent to ${to}. The response will arrive in your inbox when complete — do NOT poll get_inbox. Stop and wait for the user to ask for results.`,
           },
         ],
         details: {
