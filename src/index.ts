@@ -16,6 +16,7 @@ import {
   removeServerInfo,
   getCoordinator,
   getAgentByPid,
+  readServerInfo,
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
 import type { ConnectionStatus } from "./types.js";
@@ -265,12 +266,17 @@ export default function (pi: ExtensionAPI) {
       toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
     });
 
+    // Determine coordinator status from server.json (not from init() return value)
+    // so that coordinator role persists across /new session replacements.
+    const serverInfo = readServerInfo(cwd);
+    const isCoordinator = serverInfo?.coordinator === toolCtx.agentName;
+
     // Register agent
     addAgent(cwd, {
       name: toolCtx.agentName!,
       pid: process.pid,
       startedAt: Date.now(),
-      isCoordinator: role === "coordinator",
+      isCoordinator,
       cwd,
     });
 
