@@ -49,7 +49,8 @@ Treat ${invokerName} as the coordinating invoker for this delegated run.
 
 Rules:
 - If you need approval, send a structured approval request to ${invokerName} with request_approval_from_agent.
-- After sending request_approval_from_agent, do not wait on irc for ${invokerName}. Approval decisions arrive through the structured approval protocol and resolve directly in your session.
+- Immediately after request_approval_from_agent, stop the current turn. Do not call get_inbox and do not wait on irc.
+- Approval decisions arrive through the structured approval protocol and will resume the delegated workflow automatically when delivered.
 - For replies, clarifications, progress updates, and final results back to ${invokerName}, use reply_to_agent so the message goes to ${invokerName}'s inbox.
 - Do not use send_to_agent task mode to return delegated skill results to ${invokerName}.
 - Do not rely only on the local user for delegated approval flow.
