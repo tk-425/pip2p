@@ -112,8 +112,8 @@ Workflow contract:
 1. **Alice sends** Bob a task, message, skill invocation, or approval response
 2. **Bob auto-runs immediately** for tasks/messages/skill invocations — no manual inbox check required on Bob
 3. **Alice does not wait in the same turn** — Alice finishes her current turn instead of polling for Bob
-4. **Bob replies later** using pip2p tools
-5. **Alice reads replies/results/approval requests from inbox** with `get_inbox`
+4. **Bob sends replies/results back to Alice's inbox** with pip2p reply tools
+5. **Structured approval decisions resume Bob directly** rather than appearing as a normal inbox message on Bob
 
 ### How It Works
 
@@ -134,9 +134,9 @@ Workflow contract:
 
 - **task** - Work delegation (auto-injected for immediate processing on the receiving agent)
 - **message** - General communication (also auto-injected for immediate processing on the receiving agent)
-- **response** - Replies and results (shown in inbox widget only)
-- **approval-request** - Structured approval requests (shown in inbox widget only)
-- **approval-decision** - Structured approval approvals/rejections (shown in inbox widget only)
+- **response** - Replies and results (shown in the recipient's inbox widget only)
+- **approval-request** - Structured approval requests (shown in the approver's inbox widget only)
+- **approval-decision** - Structured approval approvals/rejections (delivered directly to the waiting agent and not shown as a normal inbox message)
 
 ### Skill Invocation Modes
 
@@ -163,10 +163,10 @@ invoke_skill_on_agent --to bob --skill firecrawl --args "search latest Apple sto
 When delegated work on Bob needs approval:
 
 1. **Bob sends Alice a structured approval request** with `request_approval_from_agent`
-2. **Alice reviews the request** from inbox and responds with `respond_to_approval_request`
+2. **Alice reviews the request from inbox** and responds with `respond_to_approval_request`
 3. **Bob can also resolve the same request locally** with `resolve_local_approval`
 4. **First approval wins** — whichever valid approval or rejection arrives first resolves the request
-5. **Late approval decisions are informational only** if the request is already resolved
+5. **Approval decisions resume Bob directly**; they do not appear as a normal inbox message on Bob
 
 ### OMP Project-Local Skill Resolution
 
@@ -227,7 +227,7 @@ request_approval_from_agent --to <agent-name> --actionType "<type>" --title "<sh
 
 ### respond_to_approval_request
 
-Approve or reject a structured approval request from another agent.
+Approve or reject a structured approval request from another agent. The decision is delivered directly back to the waiting agent and resumes the delegated workflow.
 
 ```bash
 respond_to_approval_request --to <agent-name> --requestId <request-id> --decision approved|rejected [--note "<note>"]
@@ -256,6 +256,12 @@ Invoke a local skill on another agent. The target agent auto-runs it immediately
 ```bash
 invoke_skill_on_agent --to <agent-name> --skill <skill-name> [--args "<skill args>"] [--reply-mode interactive|auto]
 ```
+
+For delegated skill runs, pip2p injects a delegated-run preamble so the receiving agent knows:
+- who invoked the skill
+- that replies/results should go back to the invoker's inbox with `reply_to_agent`
+- that approval should use `request_approval_from_agent`
+- that approval decisions resume the workflow directly rather than through inbox polling
 
 ## Configuration
 
@@ -352,10 +358,10 @@ send_to_agent --to bob --message "Hello Bob!" --type message
 - Verify agent names are correct
 - Check `.pip2p/agents.json` for registered agents
 
-### Skill invocation behavior
+### Skill invocation and delegated approval behavior
 
-- **pi** - Structured cross-agent skill invocation works. Interactive and auto replies are both delivered to the inbox.
-- **omp** - Structured cross-agent skill invocation also works. For OMP, pip2p resolves project-local skills from `.agents/skills/<name>/SKILL.md` and dispatches them through OMP's native skill-prompt path.
+- **pi** - Structured cross-agent skill invocation works. Interactive and auto replies are delivered to the invoker's inbox, and delegated approval decisions resume the worker directly.
+- **omp** - Structured cross-agent skill invocation also works. For OMP, pip2p resolves project-local skills from `.agents/skills/<name>/SKILL.md`, dispatches them through OMP's native skill-prompt path, and uses the same direct delegated approval resume behavior as pi.
 
 ### Extension not loading
 
