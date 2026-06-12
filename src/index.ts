@@ -41,12 +41,27 @@ function buildSkillCommand(
   const command = args ? `/skill:${skillName} ${args}` : `/skill:${skillName}`;
   return { ok: true, command };
 }
+function buildDelegatedRunPreamble(invokerName: string): string {
+  return `[pip2p delegated run]
+
+This skill was invoked by pip2p agent ${invokerName}.
+Treat ${invokerName} as the coordinating invoker for this delegated run.
+
+Rules:
+- If you need approval, send a structured approval request to ${invokerName} with request_approval_from_agent.
+- After sending request_approval_from_agent, do not wait on irc for ${invokerName}. Approval decisions arrive through the structured approval protocol and resolve directly in your session.
+- For replies, clarifications, progress updates, and final results back to ${invokerName}, use reply_to_agent so the message goes to ${invokerName}'s inbox.
+- Do not use send_to_agent task mode to return delegated skill results to ${invokerName}.
+- Do not rely only on the local user for delegated approval flow.
+- If the local user resolves approval first, use resolve_local_approval, but continue treating ${invokerName} as part of the delegated workflow.`;
+}
 function isOmpRuntime(): boolean {
   return Boolean(process.versions?.bun) || process.title === "omp";
 }
 
 async function buildOmpSkillPrompt(
   cwd: string,
+  invokerName: string,
   skillName: string,
   args: string | undefined,
 ): Promise<
@@ -81,7 +96,8 @@ async function buildOmpSkillPrompt(
     metaLines.push(`User: ${trimmedArgs}`);
   }
 
-  const message = `${body}\n\n---\n\n${metaLines.join("\n")}`;
+  const preamble = buildDelegatedRunPreamble(invokerName);
+  const message = `${preamble}\n\n${body}\n\n---\n\n${metaLines.join("\n")}`;
   return {
     ok: true,
     payload: {
@@ -175,13 +191,16 @@ export default function (pi: ExtensionAPI) {
   // Register tools immediately so omp/pi includes them in the active tool set
   let activeInvokeSession: ActiveInvokeSession | null = null;
 
+  function clearInvokeSession(): void {
+    activeInvokeSession = null;
+  }
+
   pi.on("message_end", (event) => {
     if (event.message.role !== "assistant" || !activeInvokeSession || !toolCtx.messageBus) {
       return;
     }
 
-    const hasToolCall = event.message.content.some((part) => part.type === "toolCall");
-    if (hasToolCall) {
+    if (activeInvokeSession.mode === "interactive") {
       return;
     }
 
@@ -199,9 +218,7 @@ export default function (pi: ExtensionAPI) {
       activeInvokeSession.threadId,
     );
 
-    if (activeInvokeSession.mode === "auto") {
-      activeInvokeSession = null;
-    }
+    clearInvokeSession();
   });
   const tools = createTools(toolCtx);
   for (const tool of tools) {
@@ -277,6 +294,7 @@ export default function (pi: ExtensionAPI) {
 
         try {
           const mode = msg.skillInvocation?.replyMode === "auto" ? "auto" : "interactive";
+          clearInvokeSession();
           activeInvokeSession = {
             requester: msg.from,
             requestMessageId: msg.id,
@@ -286,9 +304,9 @@ export default function (pi: ExtensionAPI) {
           };
 
           if (isOmpRuntime()) {
-            const ompSkillResult = await buildOmpSkillPrompt(cwd, skillName, args);
+            const ompSkillResult = await buildOmpSkillPrompt(cwd, msg.from, skillName, args);
             if (!ompSkillResult.ok) {
-              activeInvokeSession = null;
+              clearInvokeSession();
               toolCtx.messageBus?.sendMessage(
                 msg.from,
                 `Failed to invoke skill: ${ompSkillResult.error}`,
@@ -304,7 +322,7 @@ export default function (pi: ExtensionAPI) {
 
           const skillResult = buildSkillCommand(pi, skillName, args);
           if (!skillResult.ok) {
-            activeInvokeSession = null;
+            clearInvokeSession();
             toolCtx.messageBus?.sendMessage(
               msg.from,
               `Failed to invoke skill: ${skillResult.error}`,
@@ -314,9 +332,10 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          pi.sendUserMessage(skillResult.command);
+          const delegatedMessage = `${buildDelegatedRunPreamble(msg.from)}\n\n${skillResult.command}`;
+          pi.sendUserMessage(delegatedMessage);
         } catch (err) {
-          activeInvokeSession = null;
+          clearInvokeSession();
           toolCtx.messageBus?.sendMessage(
             msg.from,
             `Failed to invoke skill "${skillName}": ${err instanceof Error ? err.message : String(err)}`,
@@ -340,8 +359,11 @@ export default function (pi: ExtensionAPI) {
       if (msg.type === "approval-decision") {
         if (msg.approvalDecision) {
           resolvePendingApproval(pendingApprovals, msg.approvalDecision, "agent");
+          const noteSuffix = msg.approvalDecision.note ? `\nNote: ${msg.approvalDecision.note}` : "";
+          pi.sendUserMessage(
+            `[pip2p] Approval decision received from ${msg.from} for request ${msg.approvalDecision.requestId}: ${msg.approvalDecision.decision}.${noteSuffix}\n\nContinue the delegated workflow now. Do not call get_inbox for this approval; it has already been delivered directly.`,
+          );
         }
-        toolCtx.widgetManager?.addMessage(msg);
         return;
       }
 
@@ -398,7 +420,7 @@ export default function (pi: ExtensionAPI) {
       toolCtx.currentPrompt = event.prompt;
       toolCtx.suppressInboxPollingThisTurn = false;
       if (activeInvokeSession?.mode === "interactive" && !event.prompt.startsWith("[pip2p] ")) {
-        activeInvokeSession = null;
+        clearInvokeSession();
       }
       return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(toolCtx.agentName!) };
     });
@@ -411,6 +433,7 @@ export default function (pi: ExtensionAPI) {
   // On quit/reload: kill the detached server process and clean up.
   pi.on("session_shutdown", async (event: SessionShutdownEvent, _ctx) => {
     if (persistReasons.has(event.reason)) {
+      clearInvokeSession();
       // Just disconnect the client — server stays alive
       toolCtx.messageBus?.shutdown(false);
       toolCtx.widgetManager?.hideAll();
@@ -427,6 +450,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    clearInvokeSession();
     toolCtx.messageBus?.shutdown(true);
     toolCtx.widgetManager?.hideAll();
   });
