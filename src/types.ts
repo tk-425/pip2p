@@ -22,7 +22,13 @@ export interface ServerInfo {
   startedAt: number;
 }
 
-export type MessageType = "task" | "response" | "message" | "invoke-skill";
+export type MessageType =
+  | "task"
+  | "response"
+  | "message"
+  | "invoke-skill"
+  | "approval-request"
+  | "approval-decision";
 
 export type SkillReplyMode = "auto" | "interactive";
 
@@ -30,6 +36,39 @@ export interface SkillInvocation {
   skillName: string;
   args?: string;
   replyMode?: SkillReplyMode;
+}
+
+export interface ApprovalRequest {
+  requestId: string;
+  threadId?: string;
+  actionType: string;
+  title: string;
+  summary: string;
+  details?: string;
+  commands?: string[];
+  files?: string[];
+  metadata?: Record<string, string>;
+  requestedAt: number;
+}
+
+export interface ApprovalDecision {
+  requestId: string;
+  decision: "approved" | "rejected";
+  note?: string;
+  decidedAt: number;
+}
+
+export type PendingApprovalStatus = "pending" | "approved" | "rejected" | "resolved-local" | "resolved-remote";
+export type PendingApprovalWinner = "local-user" | "agent";
+
+export interface PendingApprovalEntry {
+  requester: string;
+  request: ApprovalRequest;
+  status: PendingApprovalStatus;
+  winner?: PendingApprovalWinner;
+  decision?: ApprovalDecision["decision"];
+  note?: string;
+  resolvedAt?: number;
 }
 
 export interface PipMessage {
@@ -42,6 +81,8 @@ export interface PipMessage {
   type: MessageType;
   inReplyTo?: string;
   skillInvocation?: SkillInvocation;
+  approvalRequest?: ApprovalRequest;
+  approvalDecision?: ApprovalDecision;
   invokeThreadId?: string;
 }
 

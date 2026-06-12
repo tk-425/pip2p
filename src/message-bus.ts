@@ -84,6 +84,8 @@ export class MessageBus {
     inReplyTo?: string,
     skillInvocation?: PipMessage["skillInvocation"],
     invokeThreadId?: string,
+    approvalRequest?: PipMessage["approvalRequest"],
+    approvalDecision?: PipMessage["approvalDecision"],
   ): PipMessage {
     const message: PipMessage = {
       id: crypto.randomUUID(),
@@ -95,6 +97,8 @@ export class MessageBus {
       type,
       inReplyTo,
       skillInvocation,
+      approvalRequest,
+      approvalDecision,
       invokeThreadId,
     };
 

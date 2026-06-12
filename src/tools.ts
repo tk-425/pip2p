@@ -7,13 +7,23 @@ import { getOtherAgents } from "./agent-registry.js";
 import { formatMessage } from "./skill-detect.js";
 import type { MessageBus } from "./message-bus.js";
 import type { WidgetManager } from "./widget-manager.js";
-import type { PipMessage, MessageType } from "./types.js";
+import type {
+  ApprovalDecision,
+  ApprovalRequest,
+  PendingApprovalEntry,
+  PipMessage,
+  MessageType,
+  SkillReplyMode,
+} from "./types.js";
 
 export interface ToolContext {
   agentName: string | null;
   cwd: string;
   messageBus: MessageBus | null;
   widgetManager: WidgetManager | null;
+  suppressInboxPollingThisTurn: boolean;
+  currentPrompt: string;
+  pendingApprovals: Map<string, PendingApprovalEntry>;
 }
 
 type ReadyToolContext = {
@@ -27,6 +37,38 @@ function getState(ctx: ToolContext): ReadyToolContext {
   return ctx as ReadyToolContext;
 }
 
+function userExplicitlyAskedToCheckInbox(prompt: string): boolean {
+  const normalized = prompt.toLowerCase();
+  return /\b(check|get|read|look at|inspect|poll|monitor)\b[\s\w]{0,40}\b(inbox|messages)\b/.test(normalized)
+    || /\bwait\b[\s\w]{0,40}\b(reply|response|inbox|message)\b/.test(normalized);
+}
+
+function getObjectParam(params: unknown): Record<string, unknown> {
+  return params && typeof params === "object" ? (params as Record<string, unknown>) : {};
+}
+
+function getStringParam(params: Record<string, unknown>, key: string): string | undefined {
+  const value = params[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function getStringArrayParam(params: Record<string, unknown>, key: string): string[] | undefined {
+  const value = params[key];
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter((item): item is string => typeof item === "string");
+  return strings.length > 0 ? strings : undefined;
+}
+
+function getReplyModeParam(params: Record<string, unknown>): SkillReplyMode | undefined {
+  const value = params.replyMode;
+  return value === "auto" || value === "interactive" ? value : undefined;
+}
+
+function getApprovalDecisionParam(params: Record<string, unknown>): ApprovalDecision["decision"] | undefined {
+  const value = params.decision;
+  return value === "approved" || value === "rejected" ? value : undefined;
+}
+
 /**
  * Create all pip2p tools
  */
@@ -34,6 +76,9 @@ export function createTools(toolCtx: ToolContext) {
   return [
     createSendToAgentTool(toolCtx),
     createInvokeSkillTool(toolCtx),
+    createRequestApprovalTool(toolCtx),
+    createRespondToApprovalTool(toolCtx),
+    createResolveLocalApprovalTool(toolCtx),
     createGetInboxTool(toolCtx),
     createListAgentsTool(toolCtx),
     createReplyToAgentTool(toolCtx),
@@ -45,6 +90,11 @@ function createSendToAgentTool(ctx: ToolContext) {
     name: "send_to_agent",
     label: "Send to Agent",
     description: "Send a task or message to another agent in the pip2p network",
+    promptGuidelines: [
+      "Use send_to_agent to delegate work or send a message to another pip2p agent.",
+      "After send_to_agent returns, do not wait for the other agent's reply in the same turn.",
+      "After send_to_agent returns, do not call get_inbox in the same turn unless the user explicitly asks you to check messages immediately.",
+    ],
     parameters: Type.Object({
       to: Type.String({ description: "Target agent name" }),
       message: Type.String({ description: "Message or task description" }),
@@ -54,56 +104,36 @@ function createSendToAgentTool(ctx: ToolContext) {
         }),
       ),
     }),
-    async execute(_toolCallId: string, params: any) {
+    async execute(_toolCallId: string, params: unknown) {
       const s = getState(ctx);
-      const { to, message, type = "task" } = params;
+      const record = getObjectParam(params);
+      const to = getStringParam(record, "to");
+      const message = getStringParam(record, "message");
+      const requestedType = getStringParam(record, "type");
+      const type: MessageType = requestedType === "message" ? "message" : "task";
 
-      // Validate target agent exists
+      if (!to || !message) {
+        return {
+          content: [{ type: "text" as const, text: 'Both "to" and "message" are required.' }],
+          details: { error: "invalid_arguments" },
+        };
+      }
+
       const otherAgents = getOtherAgents(s.cwd, s.agentName);
       const target = otherAgents.find((a) => a.name === to);
       if (!target) {
         const available = otherAgents.map((a) => a.name).join(", ") || "none";
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Agent "${to}" not found. Available agents: ${available}`,
-            },
-          ],
+          content: [{ type: "text" as const, text: `Agent "${to}" not found. Available agents: ${available}` }],
           details: { error: "agent_not_found" },
         };
       }
 
-      let finalType: MessageType = type;
-      let finalInReplyTo: string | undefined;
-      let finalInvokeThreadId: string | undefined;
-      const recentFromTarget = s.messageBus.hasRecentFrom(to);
-      if (recentFromTarget && type !== "response") {
-        if (recentFromTarget.type === "task" || recentFromTarget.type === "message" || recentFromTarget.type === "invoke-skill") {
-          finalType = "response";
-          finalInReplyTo = recentFromTarget.id;
-        } else if (recentFromTarget.type === "response" && recentFromTarget.invokeThreadId) {
-          finalType = "response";
-          finalInReplyTo = recentFromTarget.id;
-          finalInvokeThreadId = recentFromTarget.invokeThreadId;
-        }
-      }
-
-      const sent = s.messageBus.sendMessage(to, message, finalType, finalInReplyTo, undefined, finalInvokeThreadId);
-
-      let responseText = `Message sent to ${to} (${s.messageBus.getStatus()} mode)`;
-      if (finalType === "response" && type !== "response") {
-        responseText += `\nNote: Auto-detected as response to ${to}'s recent message (prevents auto-loop)`;
-      }
-
+      const sent = s.messageBus.sendMessage(to, message, type);
+      ctx.suppressInboxPollingThisTurn = true;
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: responseText,
-          },
-        ],
-        details: { messageId: sent.id, status: s.messageBus.getStatus(), type: finalType },
+        content: [{ type: "text" as const, text: `Message sent to ${to} (${s.messageBus.getStatus()} mode)` }],
+        details: { messageId: sent.id, status: s.messageBus.getStatus(), type },
       };
     },
   };
@@ -113,32 +143,43 @@ function createInvokeSkillTool(ctx: ToolContext) {
   return {
     name: "invoke_skill_on_agent",
     label: "Invoke Skill on Agent",
-    description: "Send a structured skill invocation request to another agent. Defaults to interactive mode unless replyMode is explicitly set to auto.",
+    description: "Send a structured skill invocation request to another agent. Defaults to interactive mode. In both interactive and auto modes, the request is sent now and this tool returns immediately; do not poll get_inbox in the same turn because replies and results arrive later.",
+    promptGuidelines: [
+      "Use invoke_skill_on_agent to delegate a skill invocation to another pip2p agent.",
+      "After invoke_skill_on_agent returns, do not wait for the delegated agent's reply in the same turn.",
+      "After invoke_skill_on_agent returns, do not call get_inbox in the same turn unless the user explicitly asks you to check messages immediately.",
+    ],
     parameters: Type.Object({
       to: Type.String({ description: "Target agent name" }),
       skill: Type.String({ description: "Local skill name to invoke on the target agent" }),
       args: Type.Optional(Type.String({ description: "Arguments to append after the skill command" })),
       replyMode: Type.Optional(
         Type.Union([Type.Literal("auto"), Type.Literal("interactive")], {
-          description: "Reply behavior: auto forwards the final result, interactive allows follow-up questions and manual continuation. Defaults to interactive.",
+          description: "Reply behavior: interactive sends immediately and does not wait; follow-up replies and results arrive later in your inbox. Auto is for one-shot requests where the final result arrives later in your inbox. In either mode, do not poll get_inbox in the same turn after calling this tool. Defaults to interactive.",
         }),
       ),
     }),
-    async execute(_toolCallId: string, params: any) {
-      const { to, skill, args, replyMode = "interactive" } = params;
+    async execute(_toolCallId: string, params: unknown) {
       const s = getState(ctx);
+      const record = getObjectParam(params);
+      const to = getStringParam(record, "to");
+      const skill = getStringParam(record, "skill");
+      const args = getStringParam(record, "args");
+      const replyMode = getReplyModeParam(record) ?? "interactive";
+
+      if (!to || !skill) {
+        return {
+          content: [{ type: "text" as const, text: 'Both "to" and "skill" are required.' }],
+          details: { error: "invalid_arguments" },
+        };
+      }
 
       const otherAgents = getOtherAgents(s.cwd, s.agentName);
       const target = otherAgents.find((a) => a.name === to);
       if (!target) {
         const available = otherAgents.map((a) => a.name).join(", ") || "none";
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Agent "${to}" not found. Available agents: ${available}`,
-            },
-          ],
+          content: [{ type: "text" as const, text: `Agent "${to}" not found. Available agents: ${available}` }],
           details: { error: "agent_not_found" },
         };
       }
@@ -157,16 +198,12 @@ function createInvokeSkillTool(ctx: ToolContext) {
 
       const responseText =
         replyMode === "auto"
-          ? `Structured skill invocation sent to ${to} in auto mode. The final result will arrive in your inbox when complete.`
-          : `Structured skill invocation sent to ${to} in interactive mode. Any follow-up replies and final results will arrive in your inbox.`;
+          ? `Structured skill invocation sent to ${to} in auto mode. The final result will arrive in your inbox later. Do not poll get_inbox in this same turn.`
+          : `Structured skill invocation sent to ${to} in interactive mode. The request was sent immediately; do not wait or poll get_inbox in this same turn. Any follow-up replies and final results will arrive in your inbox later.`;
 
+      ctx.suppressInboxPollingThisTurn = true;
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: responseText,
-          },
-        ],
+        content: [{ type: "text" as const, text: responseText }],
         details: {
           messageId: sent.id,
           status: s.messageBus.getStatus(),
@@ -178,20 +215,243 @@ function createInvokeSkillTool(ctx: ToolContext) {
   };
 }
 
+function createRequestApprovalTool(ctx: ToolContext) {
+  return {
+    name: "request_approval_from_agent",
+    label: "Request Approval from Agent",
+    description: "Send a structured approval request to another agent and track it locally until the first approval or rejection arrives.",
+    promptGuidelines: [
+      "Use request_approval_from_agent when delegated work needs approval from another pip2p agent.",
+      "After request_approval_from_agent returns, do not wait or poll get_inbox in the same turn unless the user explicitly asks you to check immediately.",
+    ],
+    parameters: Type.Object({
+      to: Type.String({ description: "Approver agent name" }),
+      actionType: Type.String({ description: "Action category needing approval" }),
+      title: Type.String({ description: "Short approval title" }),
+      summary: Type.String({ description: "Short summary of what is being approved" }),
+      details: Type.Optional(Type.String({ description: "Longer approval context" })),
+      commands: Type.Optional(Type.Array(Type.String({ description: "Command to approve" }))),
+      files: Type.Optional(Type.Array(Type.String({ description: "Affected file" }))),
+      threadId: Type.Optional(Type.String({ description: "Optional workflow thread id" })),
+    }),
+    async execute(_toolCallId: string, params: unknown) {
+      const s = getState(ctx);
+      const record = getObjectParam(params);
+      const to = getStringParam(record, "to");
+      const actionType = getStringParam(record, "actionType");
+      const title = getStringParam(record, "title");
+      const summary = getStringParam(record, "summary");
+      const details = getStringParam(record, "details");
+      const commands = getStringArrayParam(record, "commands");
+      const files = getStringArrayParam(record, "files");
+      const threadId = getStringParam(record, "threadId");
+
+      if (!to || !actionType || !title || !summary) {
+        return {
+          content: [{ type: "text" as const, text: 'The fields "to", "actionType", "title", and "summary" are required.' }],
+          details: { error: "invalid_arguments" },
+        };
+      }
+
+      const otherAgents = getOtherAgents(s.cwd, s.agentName);
+      const target = otherAgents.find((a) => a.name === to);
+      if (!target) {
+        const available = otherAgents.map((a) => a.name).join(", ") || "none";
+        return {
+          content: [{ type: "text" as const, text: `Agent "${to}" not found. Available agents: ${available}` }],
+          details: { error: "agent_not_found" },
+        };
+      }
+
+      const request: ApprovalRequest = {
+        requestId: crypto.randomUUID(),
+        threadId,
+        actionType,
+        title,
+        summary,
+        details,
+        commands,
+        files,
+        requestedAt: Date.now(),
+      };
+
+      ctx.pendingApprovals.set(request.requestId, {
+        requester: to,
+        request,
+        status: "pending",
+      });
+
+      const sent = s.messageBus.sendMessage(
+        to,
+        `${title}\n\n${summary}`,
+        "approval-request",
+        undefined,
+        undefined,
+        threadId,
+        request,
+      );
+
+      ctx.suppressInboxPollingThisTurn = true;
+      return {
+        content: [{ type: "text" as const, text: `Approval request sent to ${to}. Request ID: ${request.requestId}` }],
+        details: { messageId: sent.id, requestId: request.requestId, status: s.messageBus.getStatus(), approvalRequest: request },
+      };
+    },
+  };
+}
+
+function createRespondToApprovalTool(ctx: ToolContext) {
+  return {
+    name: "respond_to_approval_request",
+    label: "Respond to Approval Request",
+    description: "Send an approval or rejection decision for a structured approval request.",
+    promptGuidelines: [
+      "Use respond_to_approval_request to approve or reject a structured approval request from another pip2p agent.",
+      "After respond_to_approval_request returns, do not wait for another reply in the same turn.",
+    ],
+    parameters: Type.Object({
+      to: Type.String({ description: "Target agent name" }),
+      requestId: Type.String({ description: "Approval request ID" }),
+      decision: Type.Union([Type.Literal("approved"), Type.Literal("rejected")], {
+        description: "Approval decision",
+      }),
+      note: Type.Optional(Type.String({ description: "Optional decision note" })),
+    }),
+    async execute(_toolCallId: string, params: unknown) {
+      const s = getState(ctx);
+      const record = getObjectParam(params);
+      const to = getStringParam(record, "to");
+      const requestId = getStringParam(record, "requestId");
+      const decision = getApprovalDecisionParam(record);
+      const note = getStringParam(record, "note");
+
+      if (!to || !requestId || !decision) {
+        return {
+          content: [{ type: "text" as const, text: 'The fields "to", "requestId", and "decision" are required.' }],
+          details: { error: "invalid_arguments" },
+        };
+      }
+
+      const otherAgents = getOtherAgents(s.cwd, s.agentName);
+      const target = otherAgents.find((a) => a.name === to);
+      if (!target) {
+        const available = otherAgents.map((a) => a.name).join(", ") || "none";
+        return {
+          content: [{ type: "text" as const, text: `Agent "${to}" not found. Available agents: ${available}` }],
+          details: { error: "agent_not_found" },
+        };
+      }
+
+      const approvalDecision: ApprovalDecision = {
+        requestId,
+        decision,
+        note,
+        decidedAt: Date.now(),
+      };
+
+      const sent = s.messageBus.sendMessage(
+        to,
+        `Approval ${decision} for request ${requestId}${note ? `: ${note}` : ""}`,
+        "approval-decision",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        approvalDecision,
+      );
+
+      ctx.suppressInboxPollingThisTurn = true;
+      return {
+        content: [{ type: "text" as const, text: `Approval decision sent to ${to} for request ${requestId}.` }],
+        details: { messageId: sent.id, requestId, decision, status: s.messageBus.getStatus() },
+      };
+    },
+  };
+}
+
+function createResolveLocalApprovalTool(ctx: ToolContext) {
+  return {
+    name: "resolve_local_approval",
+    label: "Resolve Local Approval",
+    description: "Resolve a locally pending approval request from the current agent session. First valid approval wins.",
+    promptGuidelines: [
+      "Use resolve_local_approval when the local user approves or rejects a pending approval request that was already sent to another pip2p agent.",
+      "After resolve_local_approval returns, do not wait or poll get_inbox in the same turn unless explicitly asked.",
+    ],
+    parameters: Type.Object({
+      requestId: Type.String({ description: "Approval request ID" }),
+      decision: Type.Union([Type.Literal("approved"), Type.Literal("rejected")], {
+        description: "Local approval decision",
+      }),
+      note: Type.Optional(Type.String({ description: "Optional local decision note" })),
+    }),
+    async execute(_toolCallId: string, params: unknown) {
+      const record = getObjectParam(params);
+      const requestId = getStringParam(record, "requestId");
+      const decision = getApprovalDecisionParam(record);
+      const note = getStringParam(record, "note");
+
+      if (!requestId || !decision) {
+        return {
+          content: [{ type: "text" as const, text: 'The fields "requestId" and "decision" are required.' }],
+          details: { error: "invalid_arguments" },
+        };
+      }
+
+      const pending = ctx.pendingApprovals.get(requestId);
+      if (!pending) {
+        return {
+          content: [{ type: "text" as const, text: `No pending approval request found for ${requestId}.` }],
+          details: { error: "request_not_found" },
+        };
+      }
+
+      if (pending.status !== "pending") {
+        return {
+          content: [{ type: "text" as const, text: `Approval request ${requestId} is already resolved (${pending.status}).` }],
+          details: { requestId, status: pending.status },
+        };
+      }
+
+      pending.status = decision === "approved" ? "resolved-local" : "rejected";
+      pending.winner = "local-user";
+      pending.decision = decision;
+      pending.note = note;
+      pending.resolvedAt = Date.now();
+      ctx.pendingApprovals.set(requestId, pending);
+
+      ctx.suppressInboxPollingThisTurn = true;
+      return {
+        content: [{ type: "text" as const, text: `Local approval recorded for ${requestId}: ${decision}.` }],
+        details: { requestId, status: pending.status, winner: pending.winner, decision },
+      };
+    },
+  };
+}
+
 function createGetInboxTool(ctx: ToolContext) {
   return {
     name: "get_inbox",
     label: "Get Inbox",
     description: "Get unread messages from your inbox",
+    promptGuidelines: [
+      "Use get_inbox to read messages that have already arrived from other pip2p agents.",
+      "Do not use get_inbox immediately after send_to_agent, reply_to_agent, invoke_skill_on_agent, or request_approval_from_agent in the same turn unless the user explicitly asks you to check messages immediately.",
+    ],
     parameters: Type.Object({
-      from: Type.Optional(
-        Type.String({ description: "Filter by sender agent name" }),
-      ),
+      from: Type.Optional(Type.String({ description: "Filter by sender agent name" })),
     }),
-    async execute(_toolCallId: string, params: any) {
+    async execute(_toolCallId: string, params: unknown) {
       const s = getState(ctx);
-      const { from } = params;
+      if (ctx.suppressInboxPollingThisTurn && !userExplicitlyAskedToCheckInbox(ctx.currentPrompt)) {
+        return {
+          content: [{ type: "text" as const, text: "Do not call get_inbox in the same turn right after sending, invoking, or requesting approval from another agent. Finish this turn and check later, unless the user explicitly asked you to check messages immediately." }],
+          details: { blocked: "same_turn_inbox_poll" },
+        };
+      }
 
+      const record = getObjectParam(params);
+      const from = getStringParam(record, "from");
       let messages: PipMessage[];
 
       if (from) {
@@ -209,7 +469,6 @@ function createGetInboxTool(ctx: ToolContext) {
       }
 
       const formatted = messages.map(formatMessage).join("\n\n");
-
       return {
         content: [{ type: "text" as const, text: formatted }],
         details: { messages, count: messages.length },
@@ -230,12 +489,7 @@ function createListAgentsTool(ctx: ToolContext) {
 
       if (otherAgents.length === 0) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: "No other agents in the network. You are the only agent.",
-            },
-          ],
+          content: [{ type: "text" as const, text: "No other agents in the network. You are the only agent." }],
           details: { agents: [] },
         };
       }
@@ -260,42 +514,44 @@ function createReplyToAgentTool(ctx: ToolContext) {
     name: "reply_to_agent",
     label: "Reply to Agent",
     description: "Reply to a message from another agent",
+    promptGuidelines: [
+      "Use reply_to_agent to answer a pip2p message that was already received.",
+      "After reply_to_agent returns, stop and do not wait for another agent's reply in the same turn.",
+      "After reply_to_agent returns, do not call get_inbox in the same turn unless the user explicitly asks you to check messages immediately.",
+    ],
     parameters: Type.Object({
       to: Type.String({ description: "Agent to reply to" }),
       message: Type.String({ description: "Reply message" }),
-      inReplyTo: Type.Optional(
-        Type.String({ description: "Message ID being replied to" }),
-      ),
+      inReplyTo: Type.Optional(Type.String({ description: "Message ID being replied to" })),
     }),
-    async execute(_toolCallId: string, params: any) {
+    async execute(_toolCallId: string, params: unknown) {
       const s = getState(ctx);
-      const { to, message, inReplyTo } = params;
+      const record = getObjectParam(params);
+      const to = getStringParam(record, "to");
+      const message = getStringParam(record, "message");
+      const inReplyTo = getStringParam(record, "inReplyTo");
 
-      // Validate target agent exists
+      if (!to || !message) {
+        return {
+          content: [{ type: "text" as const, text: 'Both "to" and "message" are required.' }],
+          details: { error: "invalid_arguments" },
+        };
+      }
+
       const otherAgents = getOtherAgents(s.cwd, s.agentName);
       const target = otherAgents.find((a) => a.name === to);
       if (!target) {
         const available = otherAgents.map((a) => a.name).join(", ") || "none";
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Agent "${to}" not found. Available agents: ${available}`,
-            },
-          ],
+          content: [{ type: "text" as const, text: `Agent "${to}" not found. Available agents: ${available}` }],
           details: { error: "agent_not_found" },
         };
       }
 
       const sent = s.messageBus.sendMessage(to, message, "response", inReplyTo);
-
+      ctx.suppressInboxPollingThisTurn = true;
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Reply sent to ${to} (${s.messageBus.getStatus()} mode)`,
-          },
-        ],
+        content: [{ type: "text" as const, text: `Reply sent to ${to} (${s.messageBus.getStatus()} mode)` }],
         details: { messageId: sent.id, status: s.messageBus.getStatus() },
       };
     },
