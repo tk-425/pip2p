@@ -199,7 +199,9 @@ export default function (pi: ExtensionAPI) {
       activeInvokeSession.threadId,
     );
 
-    activeInvokeSession = null;
+    if (activeInvokeSession.mode === "auto") {
+      activeInvokeSession = null;
+    }
   });
   const tools = createTools(toolCtx);
   for (const tool of tools) {
@@ -395,6 +397,9 @@ export default function (pi: ExtensionAPI) {
     pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
       toolCtx.currentPrompt = event.prompt;
       toolCtx.suppressInboxPollingThisTurn = false;
+      if (activeInvokeSession?.mode === "interactive" && !event.prompt.startsWith("[pip2p] ")) {
+        activeInvokeSession = null;
+      }
       return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(toolCtx.agentName!) };
     });
 
