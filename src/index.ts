@@ -98,7 +98,21 @@ async function buildOmpSkillPrompt(
   }
 
   const preamble = buildDelegatedRunPreamble(invokerName);
-  const message = `${preamble}\n\n${body}\n\n---\n\n${metaLines.join("\n")}`;
+  // Put reply instructions FIRST and LAST so the OMP agent cannot miss them.
+  // The skill body goes in the middle.
+  const header = `## ⚠️  DELEGATED SKILL — REPLY REQUIRED
+
+You are running skill "${skillName}" on behalf of pip2p agent **${invokerName}**.
+
+${preamble}`;
+
+  const footer = `## ⚠️  REMINDER — REPLY REQUIRED
+
+When you finish this skill, you MUST use **reply_to_agent** to send your
+results to **${invokerName}**'s inbox. Do NOT just display results locally —
+${invokerName} cannot see your output unless you explicitly reply.`;
+
+  const message = `${header}\n\n---\n\n## SKILL CONTENT\n\n${body}\n\n---\n\n${footer}\n\n${metaLines.join("\n")}`;
   return {
     ok: true,
     payload: {
@@ -143,6 +157,7 @@ type ActiveInvokeSession = {
   skillName: string;
   mode: "auto" | "interactive";
   threadId: string;
+  explicitReplySent: boolean;
 };
 
 function extractAssistantText(message: { content?: Array<{ type?: string; text?: string }> }): string {
@@ -196,6 +211,30 @@ export default function (pi: ExtensionAPI) {
     activeInvokeSession = null;
   }
 
+  function relayInvokeSessionResponse(session: ActiveInvokeSession, text: string): void {
+    if (!toolCtx.messageBus || !text) {
+      return;
+    }
+    toolCtx.messageBus.sendMessage(
+      session.requester,
+      text,
+      "response",
+      session.requestMessageId,
+      undefined,
+      session.threadId,
+    );
+  }
+
+  pi.on("tool_result", (event) => {
+    if (!activeInvokeSession || event.toolName !== "reply_to_agent" || event.isError) {
+      return;
+    }
+    const to = typeof event.input?.to === "string" ? event.input.to : undefined;
+    if (to === activeInvokeSession.requester) {
+      activeInvokeSession.explicitReplySent = true;
+    }
+  });
+
   pi.on("message_end", (event) => {
     if (event.message.role !== "assistant" || !activeInvokeSession || !toolCtx.messageBus) {
       return;
@@ -210,16 +249,28 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    toolCtx.messageBus.sendMessage(
-      activeInvokeSession.requester,
-      text,
-      "response",
-      activeInvokeSession.requestMessageId,
-      undefined,
-      activeInvokeSession.threadId,
-    );
-
+    relayInvokeSessionResponse(activeInvokeSession, text);
     clearInvokeSession();
+  });
+
+  pi.on("agent_end", (event) => {
+    if (!isOmpRuntime() || !activeInvokeSession || !toolCtx.messageBus) {
+      return;
+    }
+    if (activeInvokeSession.mode !== "interactive" || activeInvokeSession.explicitReplySent) {
+      return;
+    }
+
+    const assistantMessages = event.messages.filter((message) => message.role === "assistant");
+    for (let idx = assistantMessages.length - 1; idx >= 0; idx--) {
+      const text = extractAssistantText(assistantMessages[idx] as { content?: Array<{ type?: string; text?: string }> });
+      if (!text) {
+        continue;
+      }
+      relayInvokeSessionResponse(activeInvokeSession, text);
+      clearInvokeSession();
+      return;
+    }
   });
   const tools = createTools(toolCtx);
   for (const tool of tools) {
@@ -302,6 +353,7 @@ export default function (pi: ExtensionAPI) {
             skillName,
             mode,
             threadId: msg.id,
+            explicitReplySent: false,
           };
 
           if (isOmpRuntime()) {
@@ -416,16 +468,25 @@ export default function (pi: ExtensionAPI) {
 
 
 
-    // Inject identity block into system prompt
+    // Inject identity block into system prompt, plus delegated-run reply
+    // instructions when handling a cross-agent skill invocation.
+    // Build extra prompt BEFORE checking interactive-mode clear so the
+    // preamble is injected even when the session is about to be reset.
     pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
       toolCtx.currentPrompt = event.prompt;
       toolCtx.suppressInboxPollingThisTurn = false;
+
+      let extra = buildIdentityBlock(toolCtx.agentName!);
+      if (activeInvokeSession) {
+        extra += "\n\n" + buildDelegatedRunPreamble(activeInvokeSession.requester);
+      }
+
       if (activeInvokeSession?.mode === "interactive" && !event.prompt.startsWith("[pip2p] ")) {
         clearInvokeSession();
       }
-      return { systemPrompt: event.systemPrompt + "\n\n" + buildIdentityBlock(toolCtx.agentName!) };
-    });
 
+      return { systemPrompt: event.systemPrompt + "\n\n" + extra };
+    });
     ctx.ui.notify(`pip2p: ${toolCtx.agentName} ${event.reason === "startup" ? "joined" : "reconnected"}`, "info");
   });
   // Cleanup on shutdown.
