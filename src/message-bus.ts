@@ -21,6 +21,16 @@ import {
 } from "./agent-registry.js";
 import type { PipMessage, ConnectionStatus, MessageType, AgentInfo } from "./types.js";
 
+export interface SendMessageOptions {
+  inReplyTo?: PipMessage["inReplyTo"];
+  skillInvocation?: PipMessage["skillInvocation"];
+  invokeThreadId?: PipMessage["invokeThreadId"];
+  approvalRequest?: PipMessage["approvalRequest"];
+  approvalDecision?: PipMessage["approvalDecision"];
+  threadResolution?: PipMessage["threadResolution"];
+  threadId?: PipMessage["threadId"];
+}
+
 export type StatusChangeHandler = (status: ConnectionStatus) => void;
 
 export class MessageBus {
@@ -81,12 +91,18 @@ export class MessageBus {
     to: string,
     content: string,
     type: MessageType = "task",
-    inReplyTo?: string,
-    skillInvocation?: PipMessage["skillInvocation"],
-    invokeThreadId?: string,
-    approvalRequest?: PipMessage["approvalRequest"],
-    approvalDecision?: PipMessage["approvalDecision"],
+    options: SendMessageOptions = {},
   ): PipMessage {
+    const {
+      inReplyTo,
+      skillInvocation,
+      invokeThreadId,
+      approvalRequest,
+      approvalDecision,
+      threadResolution,
+      threadId,
+    } = options;
+
     const message: PipMessage = {
       id: crypto.randomUUID(),
       from: this.agentName,
@@ -95,10 +111,12 @@ export class MessageBus {
       timestamp: Date.now(),
       read: false,
       type,
+      threadId,
       inReplyTo,
       skillInvocation,
       approvalRequest,
       approvalDecision,
+      threadResolution,
       invokeThreadId,
     };
 

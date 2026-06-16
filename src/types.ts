@@ -28,7 +28,8 @@ export type MessageType =
   | "message"
   | "invoke-skill"
   | "approval-request"
-  | "approval-decision";
+  | "approval-decision"
+  | "thread-resolved";
 
 export type SkillReplyMode = "auto" | "interactive";
 
@@ -58,6 +59,11 @@ export interface ApprovalDecision {
   decidedAt: number;
 }
 
+export interface ThreadResolution {
+  threadId: string;
+  sender: string;
+}
+
 export type PendingApprovalStatus = "pending" | "approved" | "rejected" | "resolved-local" | "resolved-remote";
 export type PendingApprovalWinner = "local-user" | "agent";
 
@@ -79,10 +85,12 @@ export interface PipMessage {
   timestamp: number;
   read: boolean;
   type: MessageType;
+  threadId?: string;
   inReplyTo?: string;
   skillInvocation?: SkillInvocation;
   approvalRequest?: ApprovalRequest;
   approvalDecision?: ApprovalDecision;
+  threadResolution?: ThreadResolution;
   invokeThreadId?: string;
 }
 

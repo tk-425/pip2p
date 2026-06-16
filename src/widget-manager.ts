@@ -5,6 +5,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getInboxDir, getOtherAgents } from "./agent-registry.js";
+import { getEffectiveThreadId } from "./threading.js";
 import type { PipMessage, AgentInfo, ConnectionStatus } from "./types.js";
 
 // ANSI color helpers for terminal rendering
@@ -25,6 +26,7 @@ interface WidgetContext {
 export class WidgetManager {
   private inbox: PipMessage[] = [];
   private connectionStatus: ConnectionStatus = "file";
+  private resolvedThreadIds: Set<string> = new Set();
 
   constructor(
     private agentName: string,
@@ -38,6 +40,8 @@ export class WidgetManager {
   addMessage(message: PipMessage): void {
     // Don't add our own messages
     if (message.from === this.agentName) return;
+
+    if (this.isThreadResolved(message)) return;
 
     // Don't add duplicates
     if (this.inbox.find((m) => m.id === message.id)) return;
@@ -73,6 +77,25 @@ export class WidgetManager {
   }
 
   /**
+   * Resolve an exact thread and remove its unread messages from badge state.
+   */
+  resolveThread(threadId: string): void {
+    if (!threadId) return;
+
+    this.resolvedThreadIds.add(threadId);
+    this.saveResolvedThreads();
+
+    const matched = this.inbox.filter((m) => !m.read && getEffectiveThreadId(m) === threadId);
+    for (const msg of matched) {
+      msg.read = true;
+      this.updateMessageFile(msg);
+    }
+
+    this.inbox = this.inbox.filter((m) => getEffectiveThreadId(m) !== threadId);
+    this.updateWidget();
+  }
+
+  /**
    * Get all unread messages
    */
   getUnread(): PipMessage[] {
@@ -95,13 +118,14 @@ export class WidgetManager {
 
     const files = fs.readdirSync(inboxDir).filter((f) => f.endsWith(".json"));
     this.inbox = [];
+    this.loadResolvedThreads();
 
     for (const file of files) {
       try {
         const filePath = path.join(inboxDir, file);
         const data = fs.readFileSync(filePath, "utf-8");
         const msg = JSON.parse(data) as PipMessage;
-        if (!msg.read && msg.from !== this.agentName) {
+        if (!msg.read && msg.from !== this.agentName && !this.isThreadResolved(msg)) {
           this.inbox.push(msg);
         }
       } catch {
@@ -144,7 +168,7 @@ export class WidgetManager {
 
     // Count unread per sender
     const unreadBySender = new Map<string, PipMessage[]>();
-    for (const msg of this.inbox.filter((m) => !m.read)) {
+    for (const msg of this.inbox.filter((m) => !m.read && !this.isThreadResolved(m))) {
       const existing = unreadBySender.get(msg.from) || [];
       existing.push(msg);
       unreadBySender.set(msg.from, existing);
@@ -201,5 +225,35 @@ export class WidgetManager {
     if (fs.existsSync(filePath)) {
       fs.writeFileSync(filePath, JSON.stringify(msg, null, 2));
     }
+  }
+
+  private isThreadResolved(msg: PipMessage): boolean {
+    return this.resolvedThreadIds.has(getEffectiveThreadId(msg));
+  }
+
+  private getResolvedThreadsFilePath(): string {
+    const resolvedDir = path.join(this.cwd, ".pip2p", "resolved-threads");
+    fs.mkdirSync(resolvedDir, { recursive: true });
+    return path.join(resolvedDir, `${this.agentName}.json`);
+  }
+
+  private loadResolvedThreads(): void {
+    const filePath = this.getResolvedThreadsFilePath();
+    if (!fs.existsSync(filePath)) {
+      this.resolvedThreadIds = new Set();
+      return;
+    }
+
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as { resolvedThreadIds?: string[] };
+      this.resolvedThreadIds = new Set(data.resolvedThreadIds ?? []);
+    } catch {
+      this.resolvedThreadIds = new Set();
+    }
+  }
+
+  private saveResolvedThreads(): void {
+    const filePath = this.getResolvedThreadsFilePath();
+    fs.writeFileSync(filePath, JSON.stringify({ resolvedThreadIds: [...this.resolvedThreadIds] }, null, 2));
   }
 }
