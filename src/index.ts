@@ -201,6 +201,7 @@ export default function (pi: ExtensionAPI) {
     widgetManager: null,
     suppressInboxPollingThisTurn: false,
     currentPrompt: "",
+    currentInboundMessage: null,
     pendingApprovals,
   };
 
@@ -215,14 +216,11 @@ export default function (pi: ExtensionAPI) {
     if (!toolCtx.messageBus || !text) {
       return;
     }
-    toolCtx.messageBus.sendMessage(
-      session.requester,
-      text,
-      "response",
-      session.requestMessageId,
-      undefined,
-      session.threadId,
-    );
+    toolCtx.messageBus.sendMessage(session.requester, text, "response", {
+      inReplyTo: session.requestMessageId,
+      invokeThreadId: session.threadId,
+      threadId: session.threadId,
+    });
   }
 
   pi.on("tool_result", (event) => {
@@ -339,7 +337,7 @@ export default function (pi: ExtensionAPI) {
             msg.from,
             `Failed to invoke skill: missing or malformed skill name in invoke-skill request ${msg.id}.`,
             "response",
-            msg.id,
+            { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
           );
           return;
         }
@@ -352,7 +350,7 @@ export default function (pi: ExtensionAPI) {
             requestMessageId: msg.id,
             skillName,
             mode,
-            threadId: msg.id,
+            threadId: msg.threadId ?? msg.id,
             explicitReplySent: false,
           };
 
@@ -364,11 +362,12 @@ export default function (pi: ExtensionAPI) {
                 msg.from,
                 `Failed to invoke skill: ${ompSkillResult.error}`,
                 "response",
-                msg.id,
+                { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
               );
               return;
             }
 
+            toolCtx.currentInboundMessage = msg;
             pi.sendMessage(ompSkillResult.payload, { triggerTurn: true });
             return;
           }
@@ -380,12 +379,13 @@ export default function (pi: ExtensionAPI) {
               msg.from,
               `Failed to invoke skill: ${skillResult.error}`,
               "response",
-              msg.id,
+              { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
             );
             return;
           }
 
           const delegatedMessage = `${buildDelegatedRunPreamble(msg.from)}\n\n${skillResult.command}`;
+          toolCtx.currentInboundMessage = msg;
           pi.sendUserMessage(delegatedMessage);
         } catch (err) {
           clearInvokeSession();
@@ -393,19 +393,42 @@ export default function (pi: ExtensionAPI) {
             msg.from,
             `Failed to invoke skill "${skillName}": ${err instanceof Error ? err.message : String(err)}`,
             "response",
-            msg.id,
+            { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
           );
         }
         return;
       }
 
       if (msg.type === "response") {
-        // Response messages go to inbox widget only
-        toolCtx.widgetManager?.addMessage(msg);
+        const isCoordinatorRecipient = readServerInfo(cwd)?.coordinator === toolCtx.agentName;
+
+        if (isCoordinatorRecipient) {
+          toolCtx.widgetManager?.addMessage(msg);
+          return;
+        }
+
+        toolCtx.currentInboundMessage = msg;
+        let instruction = `[pip2p] ${msg.from} replied: "${msg.content}"\n\nIMPORTANT:\n1. Continue based on this reply and SHOW your response to your user if you send one.\n2. If you need to answer ${msg.from}, use send_to_agent or reply_to_agent. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message.`;
+
+        const skillName = detectSkillReference(msg.content);
+        if (skillName) {
+          instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
+        }
+
+        pi.sendUserMessage(instruction);
         return;
       }
       if (msg.type === "approval-request") {
         toolCtx.widgetManager?.addMessage(msg);
+        return;
+      }
+
+      if (msg.type === "thread-resolved") {
+        const coordinatorName = readServerInfo(cwd)?.coordinator;
+        const threadId = msg.threadResolution?.threadId;
+        if (coordinatorName && threadId && msg.from === coordinatorName) {
+          toolCtx.widgetManager?.resolveThread(threadId);
+        }
         return;
       }
 
@@ -420,8 +443,16 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Task and message types auto-inject so agent processes them
-      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+      const isCoordinatorRecipient = readServerInfo(cwd)?.coordinator === toolCtx.agentName;
+      if (isCoordinatorRecipient) {
+        toolCtx.widgetManager?.addMessage(msg);
+        return;
+      }
+
+      toolCtx.currentInboundMessage = msg;
+
+      // Task and message types auto-inject so worker agents process them immediately
+      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
 
       const skillName = detectSkillReference(msg.content);
       if (skillName) {
@@ -475,6 +506,9 @@ export default function (pi: ExtensionAPI) {
     pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
       toolCtx.currentPrompt = event.prompt;
       toolCtx.suppressInboxPollingThisTurn = false;
+      if (!event.prompt.startsWith("[pip2p] ")) {
+        toolCtx.currentInboundMessage = null;
+      }
 
       let extra = buildIdentityBlock(toolCtx.agentName!);
       if (activeInvokeSession) {

@@ -3,8 +3,9 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import { getOtherAgents } from "./agent-registry.js";
+import { getOtherAgents, readServerInfo } from "./agent-registry.js";
 import { formatMessage } from "./skill-detect.js";
+import { getEffectiveThreadId } from "./threading.js";
 import type { MessageBus } from "./message-bus.js";
 import type { WidgetManager } from "./widget-manager.js";
 import type {
@@ -23,6 +24,7 @@ export interface ToolContext {
   widgetManager: WidgetManager | null;
   suppressInboxPollingThisTurn: boolean;
   currentPrompt: string;
+  currentInboundMessage: PipMessage | null;
   pendingApprovals: Map<string, PendingApprovalEntry>;
 }
 
@@ -67,6 +69,12 @@ function getReplyModeParam(params: Record<string, unknown>): SkillReplyMode | un
 function getApprovalDecisionParam(params: Record<string, unknown>): ApprovalDecision["decision"] | undefined {
   const value = params.decision;
   return value === "approved" || value === "rejected" ? value : undefined;
+}
+
+function getActiveThreadId(ctx: ToolContext): string | undefined {
+  const inbound = ctx.currentInboundMessage;
+  if (!inbound) return undefined;
+  return getEffectiveThreadId(inbound);
 }
 
 /**
@@ -129,7 +137,8 @@ function createSendToAgentTool(ctx: ToolContext) {
         };
       }
 
-      const sent = s.messageBus.sendMessage(to, message, type);
+      const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
+      const sent = s.messageBus.sendMessage(to, message, type, { threadId });
       ctx.suppressInboxPollingThisTurn = true;
       return {
         content: [{ type: "text" as const, text: `Message sent to ${to} (${s.messageBus.getStatus()} mode)` }],
@@ -184,17 +193,15 @@ function createInvokeSkillTool(ctx: ToolContext) {
         };
       }
 
-      const sent = s.messageBus.sendMessage(
-        to,
-        "Structured skill invocation request",
-        "invoke-skill",
-        undefined,
-        {
+      const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
+      const sent = s.messageBus.sendMessage(to, "Structured skill invocation request", "invoke-skill", {
+        skillInvocation: {
           skillName: skill,
           args,
           replyMode,
         },
-      );
+        threadId,
+      });
 
       const responseText =
         replyMode === "auto"
@@ -263,9 +270,11 @@ function createRequestApprovalTool(ctx: ToolContext) {
         };
       }
 
+      const effectiveThreadId = threadId ?? getActiveThreadId(ctx) ?? crypto.randomUUID();
+
       const request: ApprovalRequest = {
         requestId: crypto.randomUUID(),
-        threadId,
+        threadId: effectiveThreadId,
         actionType,
         title,
         summary,
@@ -281,15 +290,11 @@ function createRequestApprovalTool(ctx: ToolContext) {
         status: "pending",
       });
 
-      const sent = s.messageBus.sendMessage(
-        to,
-        `${title}\n\n${summary}`,
-        "approval-request",
-        undefined,
-        undefined,
-        threadId,
-        request,
-      );
+      const sent = s.messageBus.sendMessage(to, `${title}\n\n${summary}`, "approval-request", {
+        invokeThreadId: effectiveThreadId,
+        approvalRequest: request,
+        threadId: effectiveThreadId,
+      });
 
       ctx.suppressInboxPollingThisTurn = true;
       return {
@@ -349,16 +354,9 @@ function createRespondToApprovalTool(ctx: ToolContext) {
         decidedAt: Date.now(),
       };
 
-      const sent = s.messageBus.sendMessage(
-        to,
-        `Approval ${decision} for request ${requestId}${note ? `: ${note}` : ""}`,
-        "approval-decision",
-        undefined,
-        undefined,
-        undefined,
-        undefined,
+      const sent = s.messageBus.sendMessage(to, `Approval ${decision} for request ${requestId}${note ? `: ${note}` : ""}`, "approval-decision", {
         approvalDecision,
-      );
+      });
 
       ctx.suppressInboxPollingThisTurn = true;
       return {
@@ -468,6 +466,28 @@ function createGetInboxTool(ctx: ToolContext) {
         };
       }
 
+      const coordinatorName = readServerInfo(s.cwd)?.coordinator;
+      const isCoordinator = coordinatorName === s.agentName;
+      if (isCoordinator) {
+        const threadIdsBySender = new Map<string, Set<string>>();
+        for (const message of messages) {
+          if (message.from === coordinatorName) continue;
+          const threadId = getEffectiveThreadId(message);
+          const existing = threadIdsBySender.get(message.from) ?? new Set<string>();
+          existing.add(threadId);
+          threadIdsBySender.set(message.from, existing);
+        }
+
+        for (const [sender, threadIds] of threadIdsBySender) {
+          for (const threadId of threadIds) {
+            s.messageBus.sendMessage(sender, "thread resolved", "thread-resolved", {
+              threadResolution: { threadId },
+              threadId,
+            });
+          }
+        }
+      }
+
       const formatted = messages.map(formatMessage).join("\n\n");
       return {
         content: [{ type: "text" as const, text: formatted }],
@@ -548,7 +568,8 @@ function createReplyToAgentTool(ctx: ToolContext) {
         };
       }
 
-      const sent = s.messageBus.sendMessage(to, message, "response", inReplyTo);
+      const threadId = getActiveThreadId(ctx) ?? inReplyTo ?? crypto.randomUUID();
+      const sent = s.messageBus.sendMessage(to, message, "response", { inReplyTo, threadId });
       ctx.suppressInboxPollingThisTurn = true;
       return {
         content: [{ type: "text" as const, text: `Reply sent to ${to} (${s.messageBus.getStatus()} mode)` }],
