@@ -34,7 +34,7 @@ type ReadyToolContext = {
 
 function getState(ctx: ToolContext): ReadyToolContext {
   if (!ctx.agentName || !ctx.messageBus || !ctx.widgetManager) {
-    throw new Error("pip2p: not initialized — wait for session to start before using pip2p tools");
+    throw new Error("pip2p is not active in this session. Run /pip2p to start.");
   }
   return ctx as ReadyToolContext;
 }
@@ -481,7 +481,7 @@ function createGetInboxTool(ctx: ToolContext) {
         for (const [sender, threadIds] of threadIdsBySender) {
           for (const threadId of threadIds) {
             s.messageBus.sendMessage(sender, "thread resolved", "thread-resolved", {
-              threadResolution: { threadId },
+              threadResolution: { threadId, sender: coordinatorName },
               threadId,
             });
           }

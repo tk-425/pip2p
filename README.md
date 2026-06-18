@@ -62,23 +62,39 @@ omp plugin list
 
 ## Usage
 
-Start multiple instances in the same project directory. Each will prompt for an agent name on startup:
+Start multiple instances in the same project directory. pip2p is inactive by default, so start each agent normally and then opt in with `/pip2p`:
 
 ```bash
 # Terminal 1 (pi or omp)
 pi    # or: omp
-# When prompted, enter: alice
+/pip2p
+# Enter: alice
 
 # Terminal 2 (pi or omp)
 pi    # or: omp
-# When prompted, enter: bob
+/pip2p
+# Enter: bob
 
 # Terminal 3 (pi or omp)
 pi    # or: omp
-# When prompted, enter: carol
+/pip2p
+# Enter: carol
 ```
 
 The first agent becomes the coordinator, and subsequent agents join as workers.
+
+Once activated, pip2p persists across `/new`, `/resume`, and `/fork` for that session.
+
+### pip2p Session Commands
+
+Use the slash command to manage pip2p in the current session:
+
+```bash
+/pip2p         # Start pip2p, or show current status if already active
+/pip2p start   # Same as /pip2p
+/pip2p status  # Show whether pip2p is active and current role/mode
+/pip2p stop    # Leave the pip2p network for this session
+```
 
 ### Sending Messages And Invoking Skills
 
@@ -196,6 +212,8 @@ your-project/
 ### send_to_agent
 
 Send a message or task to another agent. The receiving agent auto-runs it immediately. After sending, do not wait in the same turn; read replies later from inbox.
+
+If pip2p is inactive in the current session, run `/pip2p` first.
 
 ```bash
 send_to_agent --to <agent-name> --message "<content>" [--type task|message]
@@ -326,11 +344,13 @@ Start two instances (pi or omp) and test messaging:
 ```bash
 # Terminal 1
 pi    # or: omp
-# When prompted, enter: alice
+/pip2p
+# Enter: alice
 
 # Terminal 2
 pi    # or: omp
-# When prompted, enter: bob
+/pip2p
+# Enter: bob
 
 # In alice's terminal, send a message
 send_to_agent --to bob --message "Hello Bob!" --type message
@@ -357,6 +377,16 @@ send_to_agent --to bob --message "Hello Bob!" --type message
 - Check connection mode (should be 🟢 Live)
 - Verify agent names are correct
 - Check `.pip2p/agents.json` for registered agents
+
+### pip2p is inactive in this session
+
+If a pip2p tool says the session is inactive, start pip2p first:
+
+```bash
+/pip2p
+```
+
+Then enter an agent name and retry the tool.
 
 ### Skill invocation and delegated approval behavior
 
