@@ -190,9 +190,10 @@ function resolvePendingApproval(
 }
 export default function (pi: ExtensionAPI) {
   let connectionStatus: ConnectionStatus = "file";
+  let isActive = false;
 
   // Mutable context shared with tools — registered at factory time,
-  // populated in session_start so omp builds its active tool set correctly.
+  // populated after activation so omp builds its active tool set correctly.
   const pendingApprovals = new Map<string, PendingApprovalEntry>();
   const toolCtx: ToolContext = {
     agentName: null,
@@ -221,6 +222,221 @@ export default function (pi: ExtensionAPI) {
       invokeThreadId: session.threadId,
       threadId: session.threadId,
     });
+  }
+
+  async function activatePip2p(
+    ctx: { cwd: string; hasUI: boolean; ui: { notify: (message: string, level?: "info" | "warning" | "error" | "success") => void; setWidget: (key: string, lines: string[] | undefined) => void; } },
+    agentName: string,
+    reason: "manual" | "restore",
+  ): Promise<{ role: "coordinator" | "worker"; isCoordinator: boolean }> {
+    if (isActive && toolCtx.agentName === agentName && toolCtx.messageBus && toolCtx.widgetManager) {
+      return {
+        role: readServerInfo(ctx.cwd)?.coordinator === agentName ? "coordinator" : "worker",
+        isCoordinator: readServerInfo(ctx.cwd)?.coordinator === agentName,
+      };
+    }
+
+    toolCtx.agentName = agentName;
+    toolCtx.cwd = ctx.cwd;
+
+    const isNew = ensurePip2pDirs(ctx.cwd);
+    ensureAgentInbox(ctx.cwd, agentName);
+    if (isNew) {
+      ensureGitignore(ctx.cwd);
+    }
+
+    toolCtx.widgetManager = new WidgetManager(agentName, ctx.cwd, ctx);
+    toolCtx.widgetManager.syncFromDisk();
+
+    toolCtx.messageBus = new MessageBus(agentName, ctx.cwd);
+
+    toolCtx.messageBus.onMessage(async (msg) => {
+
+      if (msg.type === "invoke-skill") {
+        const skillName = msg.skillInvocation?.skillName?.trim();
+        const args = msg.skillInvocation?.args?.trim();
+
+        if (!skillName) {
+          toolCtx.messageBus?.sendMessage(
+            msg.from,
+            `Failed to invoke skill: missing or malformed skill name in invoke-skill request ${msg.id}.`,
+            "response",
+            { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
+          );
+          return;
+        }
+
+        try {
+          const mode = msg.skillInvocation?.replyMode === "auto" ? "auto" : "interactive";
+          clearInvokeSession();
+          activeInvokeSession = {
+            requester: msg.from,
+            requestMessageId: msg.id,
+            skillName,
+            mode,
+            threadId: msg.threadId ?? msg.id,
+            explicitReplySent: false,
+          };
+
+          if (isOmpRuntime()) {
+            const ompSkillResult = await buildOmpSkillPrompt(ctx.cwd, msg.from, skillName, args);
+            if (!ompSkillResult.ok) {
+              clearInvokeSession();
+              toolCtx.messageBus?.sendMessage(
+                msg.from,
+                `Failed to invoke skill: ${ompSkillResult.error}`,
+                "response",
+                { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
+              );
+              return;
+            }
+
+            toolCtx.currentInboundMessage = msg;
+            pi.sendMessage(ompSkillResult.payload, { triggerTurn: true });
+            return;
+          }
+
+          const skillResult = buildSkillCommand(pi, skillName, args);
+          if (!skillResult.ok) {
+            clearInvokeSession();
+            toolCtx.messageBus?.sendMessage(
+              msg.from,
+              `Failed to invoke skill: ${skillResult.error}`,
+              "response",
+              { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
+            );
+            return;
+          }
+
+          const delegatedMessage = `${buildDelegatedRunPreamble(msg.from)}\n\n${skillResult.command}`;
+          toolCtx.currentInboundMessage = msg;
+          pi.sendUserMessage(delegatedMessage);
+        } catch (err) {
+          clearInvokeSession();
+          toolCtx.messageBus?.sendMessage(
+            msg.from,
+            `Failed to invoke skill "${skillName}": ${err instanceof Error ? err.message : String(err)}`,
+            "response",
+            { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
+          );
+        }
+        return;
+      }
+
+      if (msg.type === "response") {
+        const isCoordinatorRecipient = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+
+        if (isCoordinatorRecipient) {
+          toolCtx.widgetManager?.addMessage(msg);
+          return;
+        }
+
+        toolCtx.currentInboundMessage = msg;
+        let instruction = `[pip2p] ${msg.from} replied: "${msg.content}"\n\nIMPORTANT:\n1. Continue based on this reply and SHOW your response to your user if you send one.\n2. If you need to answer ${msg.from}, use send_to_agent or reply_to_agent. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message.`;
+
+        const skillName = detectSkillReference(msg.content);
+        if (skillName) {
+          instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
+        }
+
+        pi.sendUserMessage(instruction);
+        return;
+      }
+      if (msg.type === "approval-request") {
+        toolCtx.widgetManager?.addMessage(msg);
+        return;
+      }
+
+      if (msg.type === "thread-resolved") {
+        const coordinatorName = readServerInfo(ctx.cwd)?.coordinator;
+        const threadId = msg.threadResolution?.threadId;
+        if (coordinatorName && threadId && msg.from === coordinatorName) {
+          toolCtx.widgetManager?.resolveThread(threadId);
+        }
+        return;
+      }
+
+      if (msg.type === "approval-decision") {
+        if (msg.approvalDecision) {
+          resolvePendingApproval(pendingApprovals, msg.approvalDecision, "agent");
+          const noteSuffix = msg.approvalDecision.note ? `\nNote: ${msg.approvalDecision.note}` : "";
+          pi.sendUserMessage(
+            `[pip2p] Approval decision received from ${msg.from} for request ${msg.approvalDecision.requestId}: ${msg.approvalDecision.decision}.${noteSuffix}\n\nContinue the delegated workflow now. Do not call get_inbox for this approval; it has already been delivered directly.`,
+          );
+        }
+        return;
+      }
+
+      const isCoordinatorRecipient = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+      if (isCoordinatorRecipient) {
+        toolCtx.widgetManager?.addMessage(msg);
+        return;
+      }
+
+      toolCtx.currentInboundMessage = msg;
+
+      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+
+      const skillName = detectSkillReference(msg.content);
+      if (skillName) {
+        instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
+      }
+
+      pi.sendUserMessage(instruction);
+    });
+
+    toolCtx.messageBus.onStatusChange((status: ConnectionStatus) => {
+      connectionStatus = status;
+      toolCtx.widgetManager?.updateAgentsWidget(status);
+    });
+
+    toolCtx.messageBus.onAgentJoin((_agent) => {
+      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
+    });
+    toolCtx.messageBus.onAgentLeave((_agentName) => {
+      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
+    });
+
+    const role = await toolCtx.messageBus.init();
+    const serverInfo = readServerInfo(ctx.cwd);
+    const isCoordinator = serverInfo?.coordinator === agentName;
+
+    addAgent(ctx.cwd, {
+      name: agentName,
+      pid: process.pid,
+      startedAt: Date.now(),
+      isCoordinator,
+      cwd: ctx.cwd,
+    });
+
+    connectionStatus = toolCtx.messageBus.getStatus();
+    toolCtx.widgetManager.updateAgentsWidget(connectionStatus);
+    isActive = true;
+    ctx.ui.notify(`pip2p: ${agentName} ${reason === "restore" ? "reconnected" : "joined"} as ${isCoordinator ? "coordinator" : role}`, "info");
+    return { role, isCoordinator };
+  }
+
+  function deactivatePip2p(cwd: string, options: { persist: boolean }): void {
+    if (!isActive || !toolCtx.agentName) {
+      return;
+    }
+
+    if (!options.persist) {
+      removeAgent(cwd, toolCtx.agentName);
+      const coordinator = getCoordinator(cwd);
+      if (coordinator?.name === toolCtx.agentName) {
+        removeServerInfo(cwd);
+      }
+    }
+
+    clearInvokeSession();
+    toolCtx.messageBus?.shutdown(!options.persist);
+    toolCtx.widgetManager?.hideAll();
+    toolCtx.messageBus = null;
+    toolCtx.widgetManager = null;
+    toolCtx.agentName = null;
+    toolCtx.currentInboundMessage = null;
+    isActive = false;
   }
 
   pi.on("tool_result", (event) => {
@@ -275,17 +491,69 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(tool as any);
   }
 
-  // Reasons where the P2P network should persist across the session transition.
-  // The extension is re-created by pi, so we use disk-persisted agent name to
-  // reconnect seamlessly.
   const persistReasons: Set<string> = new Set(["new", "resume", "fork"]);
 
-  // Initialize on session start
+  pi.registerCommand("pip2p", {
+    description: "Manage pip2p for this session: /pip2p, /pip2p status, /pip2p stop",
+    handler: async (args, ctx) => {
+      toolCtx.cwd = ctx.cwd;
+      const subcommand = args.trim().toLowerCase();
+
+      if (subcommand === "status") {
+        if (!isActive || !toolCtx.agentName || !toolCtx.messageBus) {
+          ctx.ui.notify("pip2p is inactive in this session.", "info");
+          return;
+        }
+
+        const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+        ctx.ui.notify(
+          `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})`,
+          "info",
+        );
+        return;
+      }
+
+      if (subcommand === "stop") {
+        if (!isActive || !toolCtx.agentName) {
+          ctx.ui.notify("pip2p is already inactive in this session.", "info");
+          return;
+        }
+
+        const previousName = toolCtx.agentName;
+        deactivatePip2p(ctx.cwd, { persist: false });
+        ctx.ui.notify(`pip2p stopped for ${previousName}.`, "info");
+        return;
+      }
+
+      if (subcommand && subcommand !== "start") {
+        ctx.ui.notify("Usage: /pip2p, /pip2p status, /pip2p stop", "warning");
+        return;
+      }
+
+      if (isActive && toolCtx.agentName && toolCtx.messageBus) {
+        const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+        ctx.ui.notify(
+          `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})`,
+          "info",
+        );
+        return;
+      }
+
+      const input = await ctx.ui.input("pip2p agent name", "Enter your pip2p agent name (e.g., alice, bob):");
+      if (!input?.trim()) {
+        ctx.ui.notify("pip2p was not started.", "warning");
+        return;
+      }
+
+      await activatePip2p(ctx as any, input.trim(), "manual");
+    },
+  });
+
   pi.on("session_start", async (event: SessionStartEvent, ctx) => {
     if (!ctx.hasUI) return;
 
-    // Determine agent name: on session replacement (new/resume/fork), look up
-    // by PID from agents.json. After /new the process PID stays the same.
+    toolCtx.cwd = ctx.cwd;
+
     let name: string | undefined;
     if (persistReasons.has(event.reason)) {
       const byPid = getAgentByPid(ctx.cwd, process.pid);
@@ -294,260 +562,40 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Fallback: ask the user (first startup or if no persisted name)
-    if (!name) {
-      const input = await ctx.ui.input("Agent name", "Enter your agent name (e.g., alice, bob):");
-      if (!input?.trim()) return;
-      name = input.trim();
+    if (name) {
+      await activatePip2p(ctx as any, name, "restore");
     }
-
-    // Persist agent to registry for future PID-based lookup
-    toolCtx.agentName = name;
-    toolCtx.cwd = ctx.cwd;
-
-    const cwd = toolCtx.cwd;
-
-    // Ensure directory structure
-    const isNew = ensurePip2pDirs(cwd);
-    ensureAgentInbox(cwd, toolCtx.agentName!);
-
-    // If .pip2p was newly created, add to .gitignore
-    if (isNew) {
-      ensureGitignore(cwd);
-    }
-
-    // Initialize widget manager
-    toolCtx.widgetManager = new WidgetManager(toolCtx.agentName!, cwd, ctx);
-
-    // Sync inbox from disk (pick up any messages received while offline)
-    toolCtx.widgetManager.syncFromDisk();
-
-    // Initialize message bus
-    toolCtx.messageBus = new MessageBus(toolCtx.agentName!, cwd);
-
-    // Handle incoming messages
-    toolCtx.messageBus.onMessage(async (msg) => {
-
-      if (msg.type === "invoke-skill") {
-        const skillName = msg.skillInvocation?.skillName?.trim();
-        const args = msg.skillInvocation?.args?.trim();
-
-        if (!skillName) {
-          toolCtx.messageBus?.sendMessage(
-            msg.from,
-            `Failed to invoke skill: missing or malformed skill name in invoke-skill request ${msg.id}.`,
-            "response",
-            { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
-          );
-          return;
-        }
-
-        try {
-          const mode = msg.skillInvocation?.replyMode === "auto" ? "auto" : "interactive";
-          clearInvokeSession();
-          activeInvokeSession = {
-            requester: msg.from,
-            requestMessageId: msg.id,
-            skillName,
-            mode,
-            threadId: msg.threadId ?? msg.id,
-            explicitReplySent: false,
-          };
-
-          if (isOmpRuntime()) {
-            const ompSkillResult = await buildOmpSkillPrompt(cwd, msg.from, skillName, args);
-            if (!ompSkillResult.ok) {
-              clearInvokeSession();
-              toolCtx.messageBus?.sendMessage(
-                msg.from,
-                `Failed to invoke skill: ${ompSkillResult.error}`,
-                "response",
-                { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
-              );
-              return;
-            }
-
-            toolCtx.currentInboundMessage = msg;
-            pi.sendMessage(ompSkillResult.payload, { triggerTurn: true });
-            return;
-          }
-
-          const skillResult = buildSkillCommand(pi, skillName, args);
-          if (!skillResult.ok) {
-            clearInvokeSession();
-            toolCtx.messageBus?.sendMessage(
-              msg.from,
-              `Failed to invoke skill: ${skillResult.error}`,
-              "response",
-              { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
-            );
-            return;
-          }
-
-          const delegatedMessage = `${buildDelegatedRunPreamble(msg.from)}\n\n${skillResult.command}`;
-          toolCtx.currentInboundMessage = msg;
-          pi.sendUserMessage(delegatedMessage);
-        } catch (err) {
-          clearInvokeSession();
-          toolCtx.messageBus?.sendMessage(
-            msg.from,
-            `Failed to invoke skill "${skillName}": ${err instanceof Error ? err.message : String(err)}`,
-            "response",
-            { inReplyTo: msg.id, threadId: msg.threadId ?? msg.id },
-          );
-        }
-        return;
-      }
-
-      if (msg.type === "response") {
-        const isCoordinatorRecipient = readServerInfo(cwd)?.coordinator === toolCtx.agentName;
-
-        if (isCoordinatorRecipient) {
-          toolCtx.widgetManager?.addMessage(msg);
-          return;
-        }
-
-        toolCtx.currentInboundMessage = msg;
-        let instruction = `[pip2p] ${msg.from} replied: "${msg.content}"\n\nIMPORTANT:\n1. Continue based on this reply and SHOW your response to your user if you send one.\n2. If you need to answer ${msg.from}, use send_to_agent or reply_to_agent. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message.`;
-
-        const skillName = detectSkillReference(msg.content);
-        if (skillName) {
-          instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
-        }
-
-        pi.sendUserMessage(instruction);
-        return;
-      }
-      if (msg.type === "approval-request") {
-        toolCtx.widgetManager?.addMessage(msg);
-        return;
-      }
-
-      if (msg.type === "thread-resolved") {
-        const coordinatorName = readServerInfo(cwd)?.coordinator;
-        const threadId = msg.threadResolution?.threadId;
-        if (coordinatorName && threadId && msg.from === coordinatorName) {
-          toolCtx.widgetManager?.resolveThread(threadId);
-        }
-        return;
-      }
-
-      if (msg.type === "approval-decision") {
-        if (msg.approvalDecision) {
-          resolvePendingApproval(pendingApprovals, msg.approvalDecision, "agent");
-          const noteSuffix = msg.approvalDecision.note ? `\nNote: ${msg.approvalDecision.note}` : "";
-          pi.sendUserMessage(
-            `[pip2p] Approval decision received from ${msg.from} for request ${msg.approvalDecision.requestId}: ${msg.approvalDecision.decision}.${noteSuffix}\n\nContinue the delegated workflow now. Do not call get_inbox for this approval; it has already been delivered directly.`,
-          );
-        }
-        return;
-      }
-
-      const isCoordinatorRecipient = readServerInfo(cwd)?.coordinator === toolCtx.agentName;
-      if (isCoordinatorRecipient) {
-        toolCtx.widgetManager?.addMessage(msg);
-        return;
-      }
-
-      toolCtx.currentInboundMessage = msg;
-
-      // Task and message types auto-inject so worker agents process them immediately
-      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
-
-      const skillName = detectSkillReference(msg.content);
-      if (skillName) {
-        instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
-      }
-
-      pi.sendUserMessage(instruction);
-    });
-
-    // Handle status changes
-    toolCtx.messageBus.onStatusChange((status: ConnectionStatus) => {
-      connectionStatus = status;
-      toolCtx.widgetManager?.updateAgentsWidget(status);
-    });
-
-    // Determine role and initialize
-    const role = await toolCtx.messageBus.init();
-
-    // Listen for agent join/leave events (from the detached server)
-    toolCtx.messageBus.onAgentJoin((_agent) => {
-      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
-    });
-    toolCtx.messageBus.onAgentLeave((_agentName) => {
-      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
-    });
-
-    // Determine coordinator status from server.json (not from init() return value)
-    // so that coordinator role persists across /new session replacements.
-    const serverInfo = readServerInfo(cwd);
-    const isCoordinator = serverInfo?.coordinator === toolCtx.agentName;
-
-    // Register agent
-    addAgent(cwd, {
-      name: toolCtx.agentName!,
-      pid: process.pid,
-      startedAt: Date.now(),
-      isCoordinator,
-      cwd,
-    });
-
-    // Update widgets
-    connectionStatus = toolCtx.messageBus.getStatus();
-    toolCtx.widgetManager!.updateAgentsWidget(connectionStatus);
-
-
-
-    // Inject identity block into system prompt, plus delegated-run reply
-    // instructions when handling a cross-agent skill invocation.
-    // Build extra prompt BEFORE checking interactive-mode clear so the
-    // preamble is injected even when the session is about to be reset.
-    pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
-      toolCtx.currentPrompt = event.prompt;
-      toolCtx.suppressInboxPollingThisTurn = false;
-      if (!event.prompt.startsWith("[pip2p] ")) {
-        toolCtx.currentInboundMessage = null;
-      }
-
-      let extra = buildIdentityBlock(toolCtx.agentName!);
-      if (activeInvokeSession) {
-        extra += "\n\n" + buildDelegatedRunPreamble(activeInvokeSession.requester);
-      }
-
-      if (activeInvokeSession?.mode === "interactive" && !event.prompt.startsWith("[pip2p] ")) {
-        clearInvokeSession();
-      }
-
-      return { systemPrompt: event.systemPrompt + "\n\n" + extra };
-    });
-    ctx.ui.notify(`pip2p: ${toolCtx.agentName} ${event.reason === "startup" ? "joined" : "reconnected"}`, "info");
   });
-  // Cleanup on shutdown.
-  // On session replacement (new/resume/fork): disconnect client but leave the
-  // detached server running so the P2P network stays alive.
-  // On quit/reload: kill the detached server process and clean up.
-  pi.on("session_shutdown", async (event: SessionShutdownEvent, _ctx) => {
-    if (persistReasons.has(event.reason)) {
+
+  pi.on("before_agent_start", (event: BeforeAgentStartEvent): BeforeAgentStartEventResult => {
+    toolCtx.currentPrompt = event.prompt;
+    toolCtx.suppressInboxPollingThisTurn = false;
+    if (!event.prompt.startsWith("[pip2p] ")) {
+      toolCtx.currentInboundMessage = null;
+    }
+
+    if (activeInvokeSession?.mode === "interactive" && !event.prompt.startsWith("[pip2p] ")) {
       clearInvokeSession();
-      // Just disconnect the client — server stays alive
-      toolCtx.messageBus?.shutdown(false);
-      toolCtx.widgetManager?.hideAll();
+    }
+
+    if (!isActive || !toolCtx.agentName) {
+      return { systemPrompt: event.systemPrompt };
+    }
+
+    let extra = buildIdentityBlock(toolCtx.agentName);
+    if (activeInvokeSession) {
+      extra += "\n\n" + buildDelegatedRunPreamble(activeInvokeSession.requester);
+    }
+
+    return { systemPrompt: event.systemPrompt + "\n\n" + extra };
+  });
+
+  pi.on("session_shutdown", async (event: SessionShutdownEvent, ctx) => {
+    if (persistReasons.has(event.reason)) {
+      deactivatePip2p(ctx.cwd, { persist: true });
       return;
     }
 
-    // Full teardown (quit / reload)
-    if (toolCtx.agentName) {
-      removeAgent(_ctx.cwd, toolCtx.agentName);
-
-      const coordinator = getCoordinator(_ctx.cwd);
-      if (coordinator?.name === toolCtx.agentName) {
-        removeServerInfo(_ctx.cwd);
-      }
-    }
-
-    clearInvokeSession();
-    toolCtx.messageBus?.shutdown(true);
-    toolCtx.widgetManager?.hideAll();
+    deactivatePip2p(ctx.cwd, { persist: false });
   });
 }
