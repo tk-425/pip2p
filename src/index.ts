@@ -52,6 +52,7 @@ Rules:
 - Immediately after request_approval_from_agent, stop the current turn. Do not call get_inbox and do not wait on irc.
 - Approval decisions arrive through the structured approval protocol and will resume the delegated workflow automatically when delivered.
 - For replies, clarifications, progress updates, and final results back to ${invokerName}, use reply_to_agent so the message goes to ${invokerName}'s inbox.
+- Immediately after reply_to_agent, stop the current turn and wait for the next inbound message from ${invokerName} before continuing.
 - Do not use send_to_agent task mode to return delegated skill results to ${invokerName}.
 - Do not rely only on the local user for delegated approval flow.
 - If the local user resolves approval first, use resolve_local_approval, but continue treating ${invokerName} as part of the delegated workflow.`;
@@ -534,6 +535,7 @@ export default function (pi: ExtensionAPI) {
       const to = typeof event.input?.to === "string" ? event.input.to : undefined;
       if (to === activeInvokeSession.requester) {
         activeInvokeSession.explicitReplySent = true;
+        clearInvokeSession();
       }
       return;
     }
