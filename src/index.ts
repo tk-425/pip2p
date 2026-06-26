@@ -552,16 +552,16 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (activeInvokeSession.mode === "interactive") {
+    if (activeInvokeSession.explicitReplySent || activeInvokeSession.awaitingApprovalDecision) {
+      return;
+    }
+
+    if (event.message.stopReason === "toolUse") {
       return;
     }
 
     const text = extractAssistantText(event.message as { content?: Array<{ type?: string; text?: string }> });
     if (!text) {
-      return;
-    }
-
-    if (activeInvokeSession.awaitingApprovalDecision) {
       return;
     }
 
