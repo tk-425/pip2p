@@ -37,3 +37,4 @@ AGENTS.md
 .codegraph/
 graphify-out/
 .firecrawl/
+.mem/
