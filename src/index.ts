@@ -21,7 +21,7 @@ import {
   readServerInfo,
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
-import type { ApprovalDecision, ConnectionStatus, PendingApprovalEntry } from "./types.js";
+import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry } from "./types.js";
 import { detectSkillReference } from "./skill-detect.js";
 
 function buildSkillCommand(
@@ -158,6 +158,8 @@ type ActiveInvokeSession = {
   mode: "auto" | "interactive";
   threadId: string;
   explicitReplySent: boolean;
+  approvalRequestSent: boolean;
+  awaitingApprovalDecision: boolean;
 };
 
 function extractAssistantText(message: { content?: Array<{ type?: string; text?: string }> }): string {
@@ -170,6 +172,48 @@ function extractAssistantText(message: { content?: Array<{ type?: string; text?:
 
   return text;
 }
+function looksLikeApprovalRequest(text: string): boolean {
+  const normalized = text.toLowerCase();
+
+  const directPhrases = [
+    "approval needed",
+    "need approval",
+    "request approval",
+    "awaiting approval",
+    "waiting for approval",
+    "please approve",
+    "approve this",
+    "needs your approval",
+    "before making any changes",
+    "before i make any changes",
+    "before proceeding",
+    "before i proceed",
+    "before i continue",
+    "waiting on your approval",
+    "waiting on your go-ahead",
+    "waiting on your confirmation",
+    "waiting for your go-ahead",
+    "waiting for your confirmation",
+    "need your go-ahead",
+    "need your confirmation",
+  ];
+
+  if (directPhrases.some((needle) => normalized.includes(needle))) {
+    return true;
+  }
+
+  const proceedPatterns = [
+    /(shall|should|may|can) i (go ahead|proceed|continue)\b/,
+    /do you want me to (go ahead|proceed|continue)\b/,
+    /is it (okay|ok|alright|all right) (if )?i (go ahead|proceed|continue)\b/,
+    /let me know (if|whether) i should (go ahead|proceed|continue)\b/,
+    /please (confirm|approve) (that )?i can (go ahead|proceed|continue)\b/,
+    /confirm (before|whether) i (go ahead|proceed|continue)\b/,
+  ];
+
+  return proceedPatterns.some((pattern) => pattern.test(normalized));
+}
+
 function resolvePendingApproval(
   pendingApprovals: Map<string, PendingApprovalEntry>,
   approvalDecision: ApprovalDecision,
@@ -224,6 +268,43 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  function synthesizeInvokeSessionApprovalRequest(session: ActiveInvokeSession, text: string): boolean {
+    if (!toolCtx.messageBus || !text || session.approvalRequestSent) {
+      return false;
+    }
+
+    const request: ApprovalRequest = {
+      requestId: crypto.randomUUID(),
+      threadId: session.threadId,
+      actionType: "delegated-skill-approval",
+      title: `Approval needed for delegated skill ${session.skillName}`,
+      summary: `Delegated run of ${session.skillName} on worker requested approval before proceeding.`,
+      details:
+        `The delegated agent asked for approval in local assistant output instead of using request_approval_from_agent.\n\n` +
+        `Delegated skill: ${session.skillName}\n` +
+        `Requester: ${session.requester}\n\n` +
+        `Assistant message:\n${text}`,
+      requestedAt: Date.now(),
+    };
+
+    pendingApprovals.set(request.requestId, {
+      requester: session.requester,
+      request,
+      status: "pending",
+    });
+
+    toolCtx.messageBus.sendMessage(session.requester, `${request.title}\n\n${request.summary}`, "approval-request", {
+      inReplyTo: session.requestMessageId,
+      invokeThreadId: session.threadId,
+      approvalRequest: request,
+      threadId: session.threadId,
+    });
+
+    session.approvalRequestSent = true;
+    session.awaitingApprovalDecision = true;
+    return true;
+  }
+
   async function activatePip2p(
     ctx: { cwd: string; hasUI: boolean; ui: { notify: (message: string, level?: "info" | "warning" | "error" | "success") => void; setWidget: (key: string, lines: string[] | undefined) => void; } },
     agentName: string,
@@ -276,6 +357,8 @@ export default function (pi: ExtensionAPI) {
             mode,
             threadId: msg.threadId ?? msg.id,
             explicitReplySent: false,
+            approvalRequestSent: false,
+            awaitingApprovalDecision: false,
           };
 
           if (isOmpRuntime()) {
@@ -359,6 +442,9 @@ export default function (pi: ExtensionAPI) {
       if (msg.type === "approval-decision") {
         if (msg.approvalDecision) {
           resolvePendingApproval(pendingApprovals, msg.approvalDecision, "agent");
+          if (activeInvokeSession?.awaitingApprovalDecision) {
+            activeInvokeSession.awaitingApprovalDecision = false;
+          }
           const noteSuffix = msg.approvalDecision.note ? `\nNote: ${msg.approvalDecision.note}` : "";
           pi.sendUserMessage(
             `[pip2p] Approval decision received from ${msg.from} for request ${msg.approvalDecision.requestId}: ${msg.approvalDecision.decision}.${noteSuffix}\n\nContinue the delegated workflow now. Do not call get_inbox for this approval; it has already been delivered directly.`,
@@ -440,12 +526,24 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("tool_result", (event) => {
-    if (!activeInvokeSession || event.toolName !== "reply_to_agent" || event.isError) {
+    if (!activeInvokeSession || event.isError) {
       return;
     }
-    const to = typeof event.input?.to === "string" ? event.input.to : undefined;
-    if (to === activeInvokeSession.requester) {
-      activeInvokeSession.explicitReplySent = true;
+
+    if (event.toolName === "reply_to_agent") {
+      const to = typeof event.input?.to === "string" ? event.input.to : undefined;
+      if (to === activeInvokeSession.requester) {
+        activeInvokeSession.explicitReplySent = true;
+      }
+      return;
+    }
+
+    if (event.toolName === "request_approval_from_agent") {
+      const to = typeof event.input?.to === "string" ? event.input.to : undefined;
+      if (to === activeInvokeSession.requester) {
+        activeInvokeSession.approvalRequestSent = true;
+        activeInvokeSession.awaitingApprovalDecision = true;
+      }
     }
   });
 
@@ -463,12 +561,22 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    if (activeInvokeSession.awaitingApprovalDecision) {
+      return;
+    }
+
+    if (!activeInvokeSession.approvalRequestSent && looksLikeApprovalRequest(text)) {
+      if (synthesizeInvokeSessionApprovalRequest(activeInvokeSession, text)) {
+        return;
+      }
+    }
+
     relayInvokeSessionResponse(activeInvokeSession, text);
     clearInvokeSession();
   });
 
   pi.on("agent_end", (event) => {
-    if (!isOmpRuntime() || !activeInvokeSession || !toolCtx.messageBus) {
+    if (!activeInvokeSession || !toolCtx.messageBus) {
       return;
     }
     if (activeInvokeSession.mode !== "interactive" || activeInvokeSession.explicitReplySent) {
@@ -481,6 +589,15 @@ export default function (pi: ExtensionAPI) {
       if (!text) {
         continue;
       }
+      if (activeInvokeSession.awaitingApprovalDecision) {
+        return;
+      }
+      if (!activeInvokeSession.approvalRequestSent && looksLikeApprovalRequest(text)) {
+        if (synthesizeInvokeSessionApprovalRequest(activeInvokeSession, text)) {
+          return;
+        }
+      }
+
       relayInvokeSessionResponse(activeInvokeSession, text);
       clearInvokeSession();
       return;
