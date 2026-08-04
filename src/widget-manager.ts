@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getInboxDir, getOtherAgents } from "./agent-registry.js";
+import { getInboxDir } from "./agent-registry.js";
 import { getEffectiveThreadId } from "./threading.js";
 import type { PipMessage, AgentInfo, ConnectionStatus } from "./types.js";
 
@@ -13,7 +13,6 @@ const C = {
   bold: (s: string) => `\x1b[1m${s}\x1b[22m`,
   cyan: (s: string) => `\x1b[36m${s}\x1b[39m`,
   yellow: (s: string) => `\x1b[33m${s}\x1b[39m`,
-  dim: (s: string) => `\x1b[2m${s}\x1b[22m`,
   reset: "\x1b[0m",
 };
 
@@ -159,14 +158,15 @@ export class WidgetManager {
    * Render the unified widget with agents list and inline inbox badges.
    */
   private updateWidget(): void {
-    const persistedRegistrations = getOtherAgents(this.cwd, this.agentName);
     const liveConnections = this.liveAgents.filter((agent) => agent.name !== this.agentName);
-    const liveNames = new Set(liveConnections.map((agent) => agent.name));
-    const persistedOnly = persistedRegistrations.filter((agent) => !liveNames.has(agent.name));
-    const displayedAgents = [...liveConnections, ...persistedOnly];
 
-    if (displayedAgents.length === 0) {
-      this.ctx.ui.setWidget(`${this.agentName}-agents`, undefined);
+    if (liveConnections.length === 0) {
+      if (this.connectionStatus === "file") {
+        const width = (process.stdout.columns || 80) - 2;
+        this.ctx.ui.setWidget(`${this.agentName}-agents`, ["─".repeat(width), "Agents: 🟡 File Mode"]);
+      } else {
+        this.ctx.ui.setWidget(`${this.agentName}-agents`, undefined);
+      }
       return;
     }
 
@@ -180,7 +180,7 @@ export class WidgetManager {
       unreadBySender.set(msg.from, existing);
     }
 
-    const maxNameLen = Math.max(...displayedAgents.map((agent) => agent.name.length));
+    const maxNameLen = Math.max(...liveConnections.map((agent) => agent.name.length));
     const width = (process.stdout.columns || 80) - 2;
     const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}`];
 
@@ -196,14 +196,7 @@ export class WidgetManager {
       lines.push(` ${icon} ${paddedName}${inboxBadge}`);
     };
 
-    if (liveConnections.length > 0) {
-      lines.push(C.dim("Live connections:"));
-      for (const agent of liveConnections) renderAgent(agent);
-    }
-    if (persistedOnly.length > 0) {
-      lines.push(C.dim("Persisted registrations:"));
-      for (const agent of persistedOnly) renderAgent(agent);
-    }
+    for (const agent of liveConnections) renderAgent(agent);
 
     this.ctx.ui.setWidget(`${this.agentName}-agents`, lines);
   }

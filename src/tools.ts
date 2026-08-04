@@ -40,6 +40,16 @@ function getState(ctx: ToolContext): ReadyToolContext {
   return ctx as ReadyToolContext;
 }
 
+function getUnavailableLiveTargetResult(s: ReadyToolContext, agentName: string) {
+  if (s.messageBus.getStatus() !== "live" || s.messageBus.getLiveAgents().some((agent) => agent.name === agentName)) {
+    return null;
+  }
+  return {
+    content: [{ type: "text" as const, text: `Agent "${agentName}" is not live and cannot receive a live message.` }],
+    details: { error: "agent_not_live", status: s.messageBus.getStatus() },
+  };
+}
+
 function userExplicitlyAskedToCheckInbox(prompt: string): boolean {
   const normalized = prompt.toLowerCase();
   return /\b(check|get|read|look at|inspect|poll|monitor)\b[\s\w]{0,40}\b(inbox|messages)\b/.test(normalized)
@@ -138,6 +148,9 @@ function createSendToAgentTool(ctx: ToolContext) {
         };
       }
 
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
+
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, message, type, { threadId });
       ctx.suppressInboxPollingThisTurn = true;
@@ -193,6 +206,9 @@ function createInvokeSkillTool(ctx: ToolContext) {
           details: { error: "agent_not_found" },
         };
       }
+
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
 
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, "Structured skill invocation request", "invoke-skill", {
@@ -271,6 +287,9 @@ function createRequestApprovalTool(ctx: ToolContext) {
         };
       }
 
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
+
       const effectiveThreadId = threadId ?? getActiveThreadId(ctx) ?? crypto.randomUUID();
 
       const request: ApprovalRequest = {
@@ -347,6 +366,9 @@ function createRespondToApprovalTool(ctx: ToolContext) {
           details: { error: "agent_not_found" },
         };
       }
+
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
 
       const approvalDecision: ApprovalDecision = {
         requestId,
@@ -506,33 +528,23 @@ function createListAgentsTool(ctx: ToolContext) {
     parameters: Type.Object({}),
     async execute() {
       const s = getState(ctx);
-      const persistedRegistrations = getOtherAgents(s.cwd, s.agentName);
       const liveConnections = s.messageBus.getLiveAgents().filter((agent) => agent.name !== s.agentName);
-      const liveNames = new Set(liveConnections.map((agent) => agent.name));
-      const persistedOnly = persistedRegistrations.filter((agent) => !liveNames.has(agent.name));
 
-      if (liveConnections.length === 0 && persistedOnly.length === 0) {
+      if (liveConnections.length === 0) {
         return {
-          content: [{ type: "text" as const, text: "No other live connections or persisted registrations." }],
-          details: { agents: [], liveConnections: [], persistedRegistrations: [] },
+          content: [{ type: "text" as const, text: "No other live connections." }],
+          details: { agents: [], liveConnections: [], status: s.messageBus.getStatus() },
         };
       }
 
       const formatAgent = (agent: AgentInfo) => `${agent.name}${agent.isCoordinator ? " (coordinator 👑)" : ""}`;
-      const lines: string[] = [`You are: ${s.agentName}`];
-      if (liveConnections.length > 0) {
-        lines.push("Live connections:");
-        for (const agent of liveConnections) lines.push(`  - ${formatAgent(agent)}`);
-      }
-      if (persistedOnly.length > 0) {
-        lines.push("Persisted registrations:");
-        for (const agent of persistedOnly) lines.push(`  - ${formatAgent(agent)}`);
-      }
+      const lines: string[] = [`You are: ${s.agentName}`, "Live connections:"];
+      for (const agent of liveConnections) lines.push(`  - ${formatAgent(agent)}`);
       lines.push(`\nConnection: ${s.messageBus.getStatus() === "live" ? "🟢 Live" : "🟡 File Mode"}`);
 
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
-        details: { agents: persistedRegistrations, liveConnections, persistedRegistrations: persistedOnly, status: s.messageBus.getStatus() },
+        details: { agents: liveConnections, liveConnections, status: s.messageBus.getStatus() },
       };
     },
   };
@@ -576,6 +588,9 @@ function createReplyToAgentTool(ctx: ToolContext) {
           details: { error: "agent_not_found" },
         };
       }
+
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
 
       const threadId = getActiveThreadId(ctx) ?? inReplyTo ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, message, "response", { inReplyTo, threadId });
