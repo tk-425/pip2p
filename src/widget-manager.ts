@@ -26,6 +26,7 @@ interface WidgetContext {
 export class WidgetManager {
   private inbox: PipMessage[] = [];
   private connectionStatus: ConnectionStatus = "file";
+  private liveAgents: AgentInfo[] = [];
   private resolvedThreadIds: Set<string> = new Set();
 
   constructor(
@@ -139,8 +140,9 @@ export class WidgetManager {
   /**
    * Update the unified agents + inbox widget.
    */
-  updateAgentsWidget(connectionStatus: ConnectionStatus): void {
+  updateAgentsWidget(connectionStatus: ConnectionStatus, liveAgents: AgentInfo[] = []): void {
     this.connectionStatus = connectionStatus;
+    this.liveAgents = [...liveAgents];
     this.updateWidget();
   }
 
@@ -157,9 +159,13 @@ export class WidgetManager {
    * Render the unified widget with agents list and inline inbox badges.
    */
   private updateWidget(): void {
-    const otherAgents = getOtherAgents(this.cwd, this.agentName);
+    const persistedRegistrations = getOtherAgents(this.cwd, this.agentName);
+    const liveConnections = this.liveAgents.filter((agent) => agent.name !== this.agentName);
+    const liveNames = new Set(liveConnections.map((agent) => agent.name));
+    const persistedOnly = persistedRegistrations.filter((agent) => !liveNames.has(agent.name));
+    const displayedAgents = [...liveConnections, ...persistedOnly];
 
-    if (otherAgents.length === 0) {
+    if (displayedAgents.length === 0) {
       this.ctx.ui.setWidget(`${this.agentName}-agents`, undefined);
       return;
     }
@@ -174,26 +180,29 @@ export class WidgetManager {
       unreadBySender.set(msg.from, existing);
     }
 
-    // Calculate name padding for alignment
-    const maxNameLen = Math.max(...otherAgents.map((a) => a.name.length));
-
+    const maxNameLen = Math.max(...displayedAgents.map((agent) => agent.name.length));
     const width = (process.stdout.columns || 80) - 2;
     const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}`];
 
-    for (const agent of otherAgents) {
+    const renderAgent = (agent: AgentInfo) => {
       const icon = agent.isCoordinator ? "👑" : "🔧";
       const paddedName = agent.isCoordinator
         ? C.bold(C.cyan(agent.name.padEnd(maxNameLen)))
         : agent.name.padEnd(maxNameLen);
-
       const unread = unreadBySender.get(agent.name);
-      let inboxBadge = "";
-      if (unread && unread.length > 0) {
-        const skillBadge = this.getSkillBadge(unread);
-        inboxBadge = `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${skillBadge}`;
-      }
-
+      const inboxBadge = unread && unread.length > 0
+        ? `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
+        : "";
       lines.push(` ${icon} ${paddedName}${inboxBadge}`);
+    };
+
+    if (liveConnections.length > 0) {
+      lines.push(C.dim("Live connections:"));
+      for (const agent of liveConnections) renderAgent(agent);
+    }
+    if (persistedOnly.length > 0) {
+      lines.push(C.dim("Persisted registrations:"));
+      for (const agent of persistedOnly) renderAgent(agent);
     }
 
     this.ctx.ui.setWidget(`${this.agentName}-agents`, lines);

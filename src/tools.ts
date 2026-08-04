@@ -9,6 +9,7 @@ import { getEffectiveThreadId } from "./threading.js";
 import type { MessageBus } from "./message-bus.js";
 import type { WidgetManager } from "./widget-manager.js";
 import type {
+  AgentInfo,
   ApprovalDecision,
   ApprovalRequest,
   PendingApprovalEntry,
@@ -505,25 +506,33 @@ function createListAgentsTool(ctx: ToolContext) {
     parameters: Type.Object({}),
     async execute() {
       const s = getState(ctx);
-      const otherAgents = getOtherAgents(s.cwd, s.agentName);
+      const persistedRegistrations = getOtherAgents(s.cwd, s.agentName);
+      const liveConnections = s.messageBus.getLiveAgents().filter((agent) => agent.name !== s.agentName);
+      const liveNames = new Set(liveConnections.map((agent) => agent.name));
+      const persistedOnly = persistedRegistrations.filter((agent) => !liveNames.has(agent.name));
 
-      if (otherAgents.length === 0) {
+      if (liveConnections.length === 0 && persistedOnly.length === 0) {
         return {
-          content: [{ type: "text" as const, text: "No other agents in the network. You are the only agent." }],
-          details: { agents: [] },
+          content: [{ type: "text" as const, text: "No other live connections or persisted registrations." }],
+          details: { agents: [], liveConnections: [], persistedRegistrations: [] },
         };
       }
 
-      const lines: string[] = [`You are: ${s.agentName}`, "Other agents:"];
-      for (const agent of otherAgents) {
-        const role = agent.isCoordinator ? " (coordinator 👑)" : "";
-        lines.push(`  - ${agent.name}${role}`);
+      const formatAgent = (agent: AgentInfo) => `${agent.name}${agent.isCoordinator ? " (coordinator 👑)" : ""}`;
+      const lines: string[] = [`You are: ${s.agentName}`];
+      if (liveConnections.length > 0) {
+        lines.push("Live connections:");
+        for (const agent of liveConnections) lines.push(`  - ${formatAgent(agent)}`);
+      }
+      if (persistedOnly.length > 0) {
+        lines.push("Persisted registrations:");
+        for (const agent of persistedOnly) lines.push(`  - ${formatAgent(agent)}`);
       }
       lines.push(`\nConnection: ${s.messageBus.getStatus() === "live" ? "🟢 Live" : "🟡 File Mode"}`);
 
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
-        details: { agents: otherAgents, status: s.messageBus.getStatus() },
+        details: { agents: persistedRegistrations, liveConnections, persistedRegistrations: persistedOnly, status: s.messageBus.getStatus() },
       };
     },
   };
