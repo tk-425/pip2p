@@ -4,7 +4,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getInboxDir, getOtherAgents } from "./agent-registry.js";
+import { getInboxDir } from "./agent-registry.js";
 import { getEffectiveThreadId } from "./threading.js";
 import type { PipMessage, AgentInfo, ConnectionStatus } from "./types.js";
 
@@ -13,7 +13,6 @@ const C = {
   bold: (s: string) => `\x1b[1m${s}\x1b[22m`,
   cyan: (s: string) => `\x1b[36m${s}\x1b[39m`,
   yellow: (s: string) => `\x1b[33m${s}\x1b[39m`,
-  dim: (s: string) => `\x1b[2m${s}\x1b[22m`,
   reset: "\x1b[0m",
 };
 
@@ -26,6 +25,7 @@ interface WidgetContext {
 export class WidgetManager {
   private inbox: PipMessage[] = [];
   private connectionStatus: ConnectionStatus = "file";
+  private liveAgents: AgentInfo[] = [];
   private resolvedThreadIds: Set<string> = new Set();
 
   constructor(
@@ -139,8 +139,9 @@ export class WidgetManager {
   /**
    * Update the unified agents + inbox widget.
    */
-  updateAgentsWidget(connectionStatus: ConnectionStatus): void {
+  updateAgentsWidget(connectionStatus: ConnectionStatus, liveAgents: AgentInfo[] = []): void {
     this.connectionStatus = connectionStatus;
+    this.liveAgents = [...liveAgents];
     this.updateWidget();
   }
 
@@ -157,10 +158,15 @@ export class WidgetManager {
    * Render the unified widget with agents list and inline inbox badges.
    */
   private updateWidget(): void {
-    const otherAgents = getOtherAgents(this.cwd, this.agentName);
+    const liveConnections = this.liveAgents.filter((agent) => agent.name !== this.agentName);
 
-    if (otherAgents.length === 0) {
-      this.ctx.ui.setWidget(`${this.agentName}-agents`, undefined);
+    if (liveConnections.length === 0) {
+      if (this.connectionStatus === "file") {
+        const width = (process.stdout.columns || 80) - 2;
+        this.ctx.ui.setWidget(`${this.agentName}-agents`, ["─".repeat(width), "Agents: 🟡 File Mode"]);
+      } else {
+        this.ctx.ui.setWidget(`${this.agentName}-agents`, undefined);
+      }
       return;
     }
 
@@ -174,27 +180,23 @@ export class WidgetManager {
       unreadBySender.set(msg.from, existing);
     }
 
-    // Calculate name padding for alignment
-    const maxNameLen = Math.max(...otherAgents.map((a) => a.name.length));
-
+    const maxNameLen = Math.max(...liveConnections.map((agent) => agent.name.length));
     const width = (process.stdout.columns || 80) - 2;
     const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}`];
 
-    for (const agent of otherAgents) {
+    const renderAgent = (agent: AgentInfo) => {
       const icon = agent.isCoordinator ? "👑" : "🔧";
       const paddedName = agent.isCoordinator
         ? C.bold(C.cyan(agent.name.padEnd(maxNameLen)))
         : agent.name.padEnd(maxNameLen);
-
       const unread = unreadBySender.get(agent.name);
-      let inboxBadge = "";
-      if (unread && unread.length > 0) {
-        const skillBadge = this.getSkillBadge(unread);
-        inboxBadge = `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${skillBadge}`;
-      }
-
+      const inboxBadge = unread && unread.length > 0
+        ? `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
+        : "";
       lines.push(` ${icon} ${paddedName}${inboxBadge}`);
-    }
+    };
+
+    for (const agent of liveConnections) renderAgent(agent);
 
     this.ctx.ui.setWidget(`${this.agentName}-agents`, lines);
   }

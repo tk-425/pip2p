@@ -51,6 +51,8 @@ export class MessageBus {
   // Callbacks for agent join/leave (forwarded from client)
   private agentJoinCallbacks: ((agent: AgentInfo) => void)[] = [];
   private agentLeaveCallbacks: ((agentName: string) => void)[] = [];
+  private liveAgents: AgentInfo[] = [];
+  private liveAgentHandlers: ((agents: AgentInfo[]) => void)[] = [];
 
   constructor(
     private agentName: string,
@@ -141,6 +143,11 @@ export class MessageBus {
     return this.status;
   }
 
+  /** Get the current transport-connected peer roster. */
+  getLiveAgents(): AgentInfo[] {
+    return [...this.liveAgents];
+  }
+
   /**
    * Register a handler for incoming messages
    */
@@ -167,6 +174,10 @@ export class MessageBus {
    */
   onAgentLeave(handler: (agentName: string) => void): void {
     this.agentLeaveCallbacks.push(handler);
+  }
+
+  onLiveAgentsChange(handler: (agents: AgentInfo[]) => void): void {
+    this.liveAgentHandlers.push(handler);
   }
 
   /**
@@ -270,15 +281,22 @@ export class MessageBus {
       if (status === "connected") {
         this.setStatus("live");
       } else if (status === "disconnected") {
+        this.setLiveAgents([]);
         this.setStatus("file");
       }
     });
 
+    this.client.onRegistry((agents: AgentInfo[]) => {
+      this.setLiveAgents(agents);
+    });
+
     this.client.onAgentJoin((agent: AgentInfo) => {
+      this.setLiveAgents([...this.liveAgents.filter((existing) => existing.name !== agent.name), agent]);
       for (const cb of this.agentJoinCallbacks) cb(agent);
     });
 
     this.client.onAgentLeave((agentName: string) => {
+      this.setLiveAgents(this.liveAgents.filter((agent) => agent.name !== agentName));
       for (const cb of this.agentLeaveCallbacks) cb(agentName);
     });
 
@@ -331,6 +349,14 @@ export class MessageBus {
     fs.mkdirSync(inboxDir, { recursive: true });
     const filePath = path.join(inboxDir, `${message.id}.json`);
     fs.writeFileSync(filePath, JSON.stringify(message, null, 2));
+  }
+
+  private setLiveAgents(agents: AgentInfo[]): void {
+    this.liveAgents = agents;
+    const snapshot = this.getLiveAgents();
+    for (const handler of this.liveAgentHandlers) {
+      handler(snapshot);
+    }
   }
 
   private setStatus(status: ConnectionStatus): void {

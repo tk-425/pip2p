@@ -474,14 +474,11 @@ export default function (pi: ExtensionAPI) {
 
     toolCtx.messageBus.onStatusChange((status: ConnectionStatus) => {
       connectionStatus = status;
-      toolCtx.widgetManager?.updateAgentsWidget(status);
+      toolCtx.widgetManager?.updateAgentsWidget(status, toolCtx.messageBus?.getLiveAgents());
     });
 
-    toolCtx.messageBus.onAgentJoin((_agent) => {
-      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
-    });
-    toolCtx.messageBus.onAgentLeave((_agentName) => {
-      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus);
+    toolCtx.messageBus.onLiveAgentsChange((liveAgents) => {
+      toolCtx.widgetManager?.updateAgentsWidget(connectionStatus, liveAgents);
     });
 
     const role = await toolCtx.messageBus.init();
@@ -497,7 +494,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     connectionStatus = toolCtx.messageBus.getStatus();
-    toolCtx.widgetManager.updateAgentsWidget(connectionStatus);
+    toolCtx.widgetManager.updateAgentsWidget(connectionStatus, toolCtx.messageBus.getLiveAgents());
     isActive = true;
     ctx.ui.notify(`pip2p: ${agentName} ${reason === "restore" ? "reconnected" : "joined"} as ${isCoordinator ? "coordinator" : role}`, "info");
     return { role, isCoordinator };

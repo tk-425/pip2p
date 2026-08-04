@@ -9,6 +9,7 @@ import { getEffectiveThreadId } from "./threading.js";
 import type { MessageBus } from "./message-bus.js";
 import type { WidgetManager } from "./widget-manager.js";
 import type {
+  AgentInfo,
   ApprovalDecision,
   ApprovalRequest,
   PendingApprovalEntry,
@@ -37,6 +38,16 @@ function getState(ctx: ToolContext): ReadyToolContext {
     throw new Error("pip2p is not active in this session. Run /pip2p to start.");
   }
   return ctx as ReadyToolContext;
+}
+
+function getUnavailableLiveTargetResult(s: ReadyToolContext, agentName: string) {
+  if (s.messageBus.getStatus() !== "live" || s.messageBus.getLiveAgents().some((agent) => agent.name === agentName)) {
+    return null;
+  }
+  return {
+    content: [{ type: "text" as const, text: `Agent "${agentName}" is not live and cannot receive a live message.` }],
+    details: { error: "agent_not_live", status: s.messageBus.getStatus() },
+  };
 }
 
 function userExplicitlyAskedToCheckInbox(prompt: string): boolean {
@@ -137,6 +148,9 @@ function createSendToAgentTool(ctx: ToolContext) {
         };
       }
 
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
+
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, message, type, { threadId });
       ctx.suppressInboxPollingThisTurn = true;
@@ -192,6 +206,9 @@ function createInvokeSkillTool(ctx: ToolContext) {
           details: { error: "agent_not_found" },
         };
       }
+
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
 
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, "Structured skill invocation request", "invoke-skill", {
@@ -270,6 +287,9 @@ function createRequestApprovalTool(ctx: ToolContext) {
         };
       }
 
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
+
       const effectiveThreadId = threadId ?? getActiveThreadId(ctx) ?? crypto.randomUUID();
 
       const request: ApprovalRequest = {
@@ -346,6 +366,9 @@ function createRespondToApprovalTool(ctx: ToolContext) {
           details: { error: "agent_not_found" },
         };
       }
+
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
 
       const approvalDecision: ApprovalDecision = {
         requestId,
@@ -505,25 +528,23 @@ function createListAgentsTool(ctx: ToolContext) {
     parameters: Type.Object({}),
     async execute() {
       const s = getState(ctx);
-      const otherAgents = getOtherAgents(s.cwd, s.agentName);
+      const liveConnections = s.messageBus.getLiveAgents().filter((agent) => agent.name !== s.agentName);
 
-      if (otherAgents.length === 0) {
+      if (liveConnections.length === 0) {
         return {
-          content: [{ type: "text" as const, text: "No other agents in the network. You are the only agent." }],
-          details: { agents: [] },
+          content: [{ type: "text" as const, text: "No other live connections." }],
+          details: { agents: [], liveConnections: [], status: s.messageBus.getStatus() },
         };
       }
 
-      const lines: string[] = [`You are: ${s.agentName}`, "Other agents:"];
-      for (const agent of otherAgents) {
-        const role = agent.isCoordinator ? " (coordinator 👑)" : "";
-        lines.push(`  - ${agent.name}${role}`);
-      }
+      const formatAgent = (agent: AgentInfo) => `${agent.name}${agent.isCoordinator ? " (coordinator 👑)" : ""}`;
+      const lines: string[] = [`You are: ${s.agentName}`, "Live connections:"];
+      for (const agent of liveConnections) lines.push(`  - ${formatAgent(agent)}`);
       lines.push(`\nConnection: ${s.messageBus.getStatus() === "live" ? "🟢 Live" : "🟡 File Mode"}`);
 
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
-        details: { agents: otherAgents, status: s.messageBus.getStatus() },
+        details: { agents: liveConnections, liveConnections, status: s.messageBus.getStatus() },
       };
     },
   };
@@ -567,6 +588,9 @@ function createReplyToAgentTool(ctx: ToolContext) {
           details: { error: "agent_not_found" },
         };
       }
+
+      const unavailableTarget = getUnavailableLiveTargetResult(s, to);
+      if (unavailableTarget) return unavailableTarget;
 
       const threadId = getActiveThreadId(ctx) ?? inReplyTo ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, message, "response", { inReplyTo, threadId });
