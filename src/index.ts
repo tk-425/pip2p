@@ -24,6 +24,8 @@ import { createTools, type ToolContext } from "./tools.js";
 import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry } from "./types.js";
 import { detectSkillReference } from "./skill-detect.js";
 
+const PIP2P_USAGE = "/pip2p, /pip2p start, /pip2p status, /pip2p stop";
+
 function buildSkillCommand(
   pi: ExtensionAPI,
   skillName: string,
@@ -523,6 +525,38 @@ export default function (pi: ExtensionAPI) {
     isActive = false;
   }
 
+  // Single source of the /pip2p status notification — used by the status
+  // subcommand, the non-UI fallback, and the menu's Status action.
+  function notifyPip2pStatus(
+    ctx: { cwd: string; ui: { notify: (message: string, level?: "info" | "warning" | "error") => void } },
+  ): void {
+    if (!isActive || !toolCtx.agentName || !toolCtx.messageBus) {
+      ctx.ui.notify("pip2p is inactive in this session.", "info");
+      return;
+    }
+
+    const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+    ctx.ui.notify(
+      `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})`,
+      "info",
+    );
+  }
+
+  // Single source of the /pip2p stop flow — shared by the stop subcommand
+  // and the menu's Stop pip2p action.
+  function stopPip2p(
+    ctx: { cwd: string; ui: { notify: (message: string, level?: "info" | "warning" | "error") => void } },
+  ): void {
+    if (!isActive || !toolCtx.agentName) {
+      ctx.ui.notify("pip2p is already inactive in this session.", "info");
+      return;
+    }
+
+    const previousName = toolCtx.agentName;
+    deactivatePip2p(ctx.cwd, { persist: false });
+    ctx.ui.notify(`pip2p stopped for ${previousName}.`, "info");
+  }
+
   pi.on("tool_result", (event) => {
     if (!activeInvokeSession || event.isError) {
       return;
@@ -610,48 +644,53 @@ export default function (pi: ExtensionAPI) {
   const persistReasons: Set<string> = new Set(["new", "resume", "fork"]);
 
   pi.registerCommand("pip2p", {
-    description: "Manage pip2p for this session: /pip2p, /pip2p status, /pip2p stop",
+    description: `Manage pip2p for this session: ${PIP2P_USAGE}`,
     handler: async (args, ctx) => {
       toolCtx.cwd = ctx.cwd;
       const subcommand = args.trim().toLowerCase();
 
       if (subcommand === "status") {
-        if (!isActive || !toolCtx.agentName || !toolCtx.messageBus) {
-          ctx.ui.notify("pip2p is inactive in this session.", "info");
-          return;
-        }
-
-        const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
-        ctx.ui.notify(
-          `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})`,
-          "info",
-        );
+        notifyPip2pStatus(ctx);
         return;
       }
 
       if (subcommand === "stop") {
-        if (!isActive || !toolCtx.agentName) {
-          ctx.ui.notify("pip2p is already inactive in this session.", "info");
-          return;
-        }
-
-        const previousName = toolCtx.agentName;
-        deactivatePip2p(ctx.cwd, { persist: false });
-        ctx.ui.notify(`pip2p stopped for ${previousName}.`, "info");
+        stopPip2p(ctx);
         return;
       }
 
       if (subcommand && subcommand !== "start") {
-        ctx.ui.notify("Usage: /pip2p, /pip2p status, /pip2p stop", "warning");
+        ctx.ui.notify(`Usage: ${PIP2P_USAGE}`, "warning");
         return;
       }
 
       if (isActive && toolCtx.agentName && toolCtx.messageBus) {
-        const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
-        ctx.ui.notify(
-          `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})`,
-          "info",
-        );
+        // UI runtime: popup menu. Non-UI fallback: status notification.
+        if (!ctx.hasUI) {
+          notifyPip2pStatus(ctx);
+          return;
+        }
+
+        const action = await ctx.ui.select("pip2p", ["Status", "Stop pip2p", "Help"]);
+        if (!action) {
+          return;
+        }
+
+        if (action === "Status") {
+          notifyPip2pStatus(ctx);
+          return;
+        }
+
+        if (action === "Stop pip2p") {
+          stopPip2p(ctx);
+          return;
+        }
+
+        if (action === "Help") {
+          ctx.ui.notify(`Usage: ${PIP2P_USAGE}`, "info");
+          return;
+        }
+
         return;
       }
 
