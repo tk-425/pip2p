@@ -19,7 +19,7 @@ import {
   isCoordinatorAlive,
   removeServerInfo,
 } from "./agent-registry.js";
-import type { PipMessage, ConnectionStatus, MessageType, AgentInfo } from "./types.js";
+import type { PipMessage, ConnectionStatus, MessageType, AgentInfo, ActivityState } from "./types.js";
 
 export interface SendMessageOptions {
   inReplyTo?: PipMessage["inReplyTo"];
@@ -53,6 +53,10 @@ export class MessageBus {
   private agentLeaveCallbacks: ((agentName: string) => void)[] = [];
   private liveAgents: AgentInfo[] = [];
   private liveAgentHandlers: ((agents: AgentInfo[]) => void)[] = [];
+
+  // Local Activity state — reported to peers over WS transport
+  private activity: ActivityState = "unknown";
+  private activityReassertTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private agentName: string,
@@ -148,6 +152,43 @@ export class MessageBus {
     return [...this.liveAgents];
   }
 
+  /** Set local Activity state and report it to peers when live. */
+  setLocalActivity(activity: ActivityState): void {
+    if (this.activity === activity) return;
+    this.activity = activity;
+
+    // Manage re-assertion timer: re-send while running, stop otherwise
+    if (activity === "running") {
+      if (!this.activityReassertTimer) {
+        this.activityReassertTimer = setInterval(() => {
+          if (this.status === "live") {
+            this.client?.sendSetActivity("running");
+          }
+        }, 30_000);
+      }
+    } else {
+      if (this.activityReassertTimer) {
+        clearInterval(this.activityReassertTimer);
+        this.activityReassertTimer = null;
+      }
+    }
+
+    if (this.status === "live") {
+      this.client?.sendSetActivity(activity);
+    }
+  }
+
+  /** Get the local agent's own Activity state. */
+  getLocalActivity(): ActivityState {
+    return this.activity;
+  }
+
+  /** Get a peer's cached Activity state (defaults to unknown). */
+  getAgentActivity(name: string): ActivityState {
+    const agent = this.liveAgents.find((a) => a.name === name);
+    return agent?.activity ?? "unknown";
+  }
+
   /**
    * Register a handler for incoming messages
    */
@@ -213,6 +254,10 @@ export class MessageBus {
    * @param killServer - If true, kill the detached server process (used on quit/reload).
    */
   shutdown(killServer = false): void {
+    if (this.activityReassertTimer) {
+      clearInterval(this.activityReassertTimer);
+      this.activityReassertTimer = null;
+    }
     this.fileWatcher?.stop();
     this.client?.disconnect();
     if (killServer && this.serverProcess) {
@@ -280,6 +325,8 @@ export class MessageBus {
     this.client.onStatusChange((status: ClientStatus) => {
       if (status === "connected") {
         this.setStatus("live");
+        // Send current Activity state once on connect so peers seed their view
+        this.client?.sendSetActivity(this.activity);
       } else if (status === "disconnected") {
         this.setLiveAgents([]);
         this.setStatus("file");
@@ -298,6 +345,16 @@ export class MessageBus {
     this.client.onAgentLeave((agentName: string) => {
       this.setLiveAgents(this.liveAgents.filter((agent) => agent.name !== agentName));
       for (const cb of this.agentLeaveCallbacks) cb(agentName);
+    });
+
+    this.client.onActivityChange(({ agent, activity }) => {
+      const idx = this.liveAgents.findIndex((a) => a.name === agent);
+      if (idx === -1) return;
+      this.liveAgents[idx] = { ...this.liveAgents[idx], activity };
+      const snapshot = this.getLiveAgents();
+      for (const handler of this.liveAgentHandlers) {
+        handler(snapshot);
+      }
     });
 
     this.client.onDisconnect(() => {

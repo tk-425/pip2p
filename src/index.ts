@@ -21,7 +21,7 @@ import {
   readServerInfo,
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
-import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry } from "./types.js";
+import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry, ActivityState } from "./types.js";
 import { detectSkillReference } from "./skill-detect.js";
 
 const PIP2P_USAGE = "/pip2p, /pip2p start, /pip2p status, /pip2p stop";
@@ -493,6 +493,7 @@ export default function (pi: ExtensionAPI) {
       startedAt: Date.now(),
       isCoordinator,
       cwd: ctx.cwd,
+      activity: "unknown",
     });
 
     connectionStatus = toolCtx.messageBus.getStatus();
@@ -536,8 +537,15 @@ export default function (pi: ExtensionAPI) {
     }
 
     const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+    const liveAgents = toolCtx.messageBus.getLiveAgents();
+    const agentLines = liveAgents.length > 0
+      ? "\n" + liveAgents.map((a) => {
+          const actStr = a.activity === "idle" ? "💤 idle" : a.activity === "running" ? "⚙️ running" : "❔ unknown";
+          return `  ${a.name} (${actStr})`;
+        }).join("\n")
+      : "";
     ctx.ui.notify(
-      `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})`,
+      `pip2p active as ${toolCtx.agentName} (${isCoordinator ? "coordinator" : "worker"}, ${toolCtx.messageBus.getStatus() === "live" ? "live" : "file mode"})${agentLines}`,
       "info",
     );
   }
@@ -636,6 +644,19 @@ export default function (pi: ExtensionAPI) {
       return;
     }
   });
+
+  pi.on("agent_start", () => {
+    if (isActive && toolCtx.messageBus) {
+      toolCtx.messageBus.setLocalActivity("running");
+    }
+  });
+
+  pi.on("agent_end", (_event, ctx) => {
+    if (isActive && toolCtx.messageBus && ctx.isIdle()) {
+      toolCtx.messageBus.setLocalActivity("idle");
+    }
+  });
+
   const tools = createTools(toolCtx);
   for (const tool of tools) {
     pi.registerTool(tool as any);

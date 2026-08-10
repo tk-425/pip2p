@@ -145,6 +145,7 @@ export class PipServer {
             startedAt: Date.now(),
             isCoordinator: false,
             cwd: "",
+            activity: "unknown",
           };
           this.agents.push(agentInfo);
           this.broadcast({ type: "agent_joined", agent: agentInfo });
@@ -177,6 +178,15 @@ export class PipServer {
         // Also notify local callback (coordinator's own handler)
         if (this.onMessageCallback) {
           this.onMessageCallback(msg.payload);
+        }
+        break;
+      }
+
+      case "set_activity": {
+        const target = this.agents.find((a) => a.name === msg.agent);
+        if (target) {
+          target.activity = msg.activity;
+          this.broadcast({ type: "activity_changed", agent: msg.agent, activity: msg.activity });
         }
         break;
       }

@@ -3,12 +3,15 @@
  * Type definitions
  */
 
+export type ActivityState = "idle" | "running" | "unknown";
+
 export interface AgentInfo {
   name: string;
   pid: number;
   startedAt: number;
   isCoordinator: boolean;
   cwd: string;
+  activity: ActivityState;
 }
 
 export interface AgentRegistry {
@@ -114,7 +117,13 @@ export interface WsHeartbeatMessage {
   agent: string;
 }
 
-export type WsClientMessage = WsRegisterMessage | WsMessagePayload | WsHeartbeatMessage;
+export interface WsSetActivityMessage {
+  type: "set_activity";
+  agent: string;
+  activity: ActivityState;
+}
+
+export type WsClientMessage = WsRegisterMessage | WsMessagePayload | WsHeartbeatMessage | WsSetActivityMessage;
 
 export interface WsRegistryBroadcast {
   type: "registry";
@@ -136,8 +145,15 @@ export interface WsAgentLeftBroadcast {
   agent: string;
 }
 
+export interface WsActivityChangedBroadcast {
+  type: "activity_changed";
+  agent: string;
+  activity: ActivityState;
+}
+
 export type WsServerMessage =
   | WsRegistryBroadcast
   | WsMessageBroadcast
   | WsAgentJoinedBroadcast
-  | WsAgentLeftBroadcast;
+  | WsAgentLeftBroadcast
+  | WsActivityChangedBroadcast;

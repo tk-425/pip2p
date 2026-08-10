@@ -50,6 +50,16 @@ function getUnavailableLiveTargetResult(s: ReadyToolContext, agentName: string) 
   };
 }
 
+function getRunningGateResult(s: ReadyToolContext, agentName: string) {
+  if (s.messageBus.getStatus() !== "live" || s.messageBus.getAgentActivity(agentName) !== "running") {
+    return null;
+  }
+  return {
+    content: [{ type: "text" as const, text: `Agent "${agentName}" is currently running a task. Do not retry immediately — inform your user that the peer is busy and to wait until its Activity state shows idle before sending again.` }],
+    details: { gated: "receiver_running" },
+  };
+}
+
 function userExplicitlyAskedToCheckInbox(prompt: string): boolean {
   const normalized = prompt.toLowerCase();
   return /\b(check|get|read|look at|inspect|poll|monitor)\b[\s\w]{0,40}\b(inbox|messages)\b/.test(normalized)
@@ -151,6 +161,9 @@ function createSendToAgentTool(ctx: ToolContext) {
       const unavailableTarget = getUnavailableLiveTargetResult(s, to);
       if (unavailableTarget) return unavailableTarget;
 
+      const runningGate = getRunningGateResult(s, to);
+      if (runningGate) return runningGate;
+
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, message, type, { threadId });
       ctx.suppressInboxPollingThisTurn = true;
@@ -209,6 +222,9 @@ function createInvokeSkillTool(ctx: ToolContext) {
 
       const unavailableTarget = getUnavailableLiveTargetResult(s, to);
       if (unavailableTarget) return unavailableTarget;
+
+      const runningGate = getRunningGateResult(s, to);
+      if (runningGate) return runningGate;
 
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, "Structured skill invocation request", "invoke-skill", {
@@ -290,6 +306,9 @@ function createRequestApprovalTool(ctx: ToolContext) {
       const unavailableTarget = getUnavailableLiveTargetResult(s, to);
       if (unavailableTarget) return unavailableTarget;
 
+      const runningGate = getRunningGateResult(s, to);
+      if (runningGate) return runningGate;
+
       const effectiveThreadId = threadId ?? getActiveThreadId(ctx) ?? crypto.randomUUID();
 
       const request: ApprovalRequest = {
@@ -369,6 +388,9 @@ function createRespondToApprovalTool(ctx: ToolContext) {
 
       const unavailableTarget = getUnavailableLiveTargetResult(s, to);
       if (unavailableTarget) return unavailableTarget;
+
+      const runningGate = getRunningGateResult(s, to);
+      if (runningGate) return runningGate;
 
       const approvalDecision: ApprovalDecision = {
         requestId,
@@ -591,6 +613,9 @@ function createReplyToAgentTool(ctx: ToolContext) {
 
       const unavailableTarget = getUnavailableLiveTargetResult(s, to);
       if (unavailableTarget) return unavailableTarget;
+
+      const runningGate = getRunningGateResult(s, to);
+      if (runningGate) return runningGate;
 
       const threadId = getActiveThreadId(ctx) ?? inReplyTo ?? crypto.randomUUID();
       const sent = s.messageBus.sendMessage(to, message, "response", { inReplyTo, threadId });
