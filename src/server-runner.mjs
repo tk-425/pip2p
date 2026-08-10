@@ -146,6 +146,7 @@ function handleClientMessage(ws, msg) {
           startedAt: Date.now(),
           isCoordinator: msg.agent.name === coordinator,
           cwd: "",
+          activity: "unknown",
         };
         agents.push(agentInfo);
         broadcast({ type: "agent_joined", agent: agentInfo });
@@ -160,6 +161,15 @@ function handleClientMessage(ws, msg) {
       const targetClient = clients.get(msg.to);
       if (targetClient && targetClient.readyState === 1) {
         targetClient.send(JSON.stringify({ type: "message", payload: msg.payload }));
+      }
+      break;
+    }
+
+    case "set_activity": {
+      const agent = agents.find((a) => a.name === msg.agent);
+      if (agent) {
+        agent.activity = msg.activity;
+        broadcast({ type: "activity_changed", agent: msg.agent, activity: msg.activity });
       }
       break;
     }
