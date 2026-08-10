@@ -202,7 +202,7 @@ export class WidgetManager {
       const inboxBadge = unread && unread.length > 0
         ? `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
         : "";
-      lines.push(`${act} ${icon} ${paddedName}${inboxBadge}`);
+      lines.push(`${icon} ${paddedName} - ${act}${inboxBadge}`);
     };
 
     for (const agent of liveConnections) renderAgent(agent);
