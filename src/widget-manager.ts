@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getInboxDir } from "./agent-registry.js";
 import { getEffectiveThreadId } from "./threading.js";
-import type { PipMessage, AgentInfo, ConnectionStatus } from "./types.js";
+import type { PipMessage, AgentInfo, ConnectionStatus, ActivityState } from "./types.js";
 
 // ANSI color helpers for terminal rendering
 const C = {
@@ -184,16 +184,25 @@ export class WidgetManager {
     const width = (process.stdout.columns || 80) - 2;
     const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}`];
 
+    const activityIndicator = (activity: ActivityState) => {
+      switch (activity) {
+        case "idle": return "💤";
+        case "running": return "⚙️";
+        default: return "❔";
+      }
+    };
+
     const renderAgent = (agent: AgentInfo) => {
       const icon = agent.isCoordinator ? "👑" : "🔧";
       const paddedName = agent.isCoordinator
         ? C.bold(C.cyan(agent.name.padEnd(maxNameLen)))
         : agent.name.padEnd(maxNameLen);
+      const act = activityIndicator(agent.activity ?? "unknown");
       const unread = unreadBySender.get(agent.name);
       const inboxBadge = unread && unread.length > 0
         ? `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
         : "";
-      lines.push(` ${icon} ${paddedName}${inboxBadge}`);
+      lines.push(`${act} ${icon} ${paddedName}${inboxBadge}`);
     };
 
     for (const agent of liveConnections) renderAgent(agent);

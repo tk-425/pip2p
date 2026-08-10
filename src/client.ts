@@ -8,6 +8,7 @@ import type {
   WsServerMessage,
   AgentInfo,
   PipMessage,
+  ActivityState,
 } from "./types.js";
 import { readServerInfo } from "./agent-registry.js";
 
@@ -27,6 +28,7 @@ export class PipClient {
   private onDisconnectCallback: (() => void) | null = null;
   private onAgentJoinCallback: ((agent: AgentInfo) => void) | null = null;
   private onAgentLeaveCallback: ((agentName: string) => void) | null = null;
+  private onActivityChangeCallback: ((data: { agent: string; activity: ActivityState }) => void) | null = null;
 
   constructor(
     private agentName: string,
@@ -149,6 +151,23 @@ export class PipClient {
     this.onAgentLeaveCallback = callback;
   }
 
+  onActivityChange(callback: (data: { agent: string; activity: ActivityState }) => void): void {
+    this.onActivityChangeCallback = callback;
+  }
+
+  sendSetActivity(activity: ActivityState): boolean {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const msg: WsClientMessage = {
+        type: "set_activity",
+        agent: this.agentName,
+        activity,
+      };
+      this.ws.send(JSON.stringify(msg));
+      return true;
+    }
+    return false;
+  }
+
   // --- Private ---
 
   private handleServerMessage(msg: WsServerMessage): void {
@@ -164,6 +183,9 @@ export class PipClient {
         break;
       case "agent_left":
         this.onAgentLeaveCallback?.(msg.agent);
+        break;
+      case "activity_changed":
+        this.onActivityChangeCallback?.({ agent: msg.agent, activity: msg.activity });
         break;
     }
   }
