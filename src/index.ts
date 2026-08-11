@@ -652,9 +652,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", (_event, ctx) => {
-    if (isActive && toolCtx.messageBus && ctx.isIdle()) {
-      toolCtx.messageBus.setLocalActivity("idle");
+    if (!isActive || !toolCtx.messageBus) {
+      return;
     }
+
+    setTimeout(() => {
+      if (
+        isActive &&
+        toolCtx.messageBus &&
+        ctx.isIdle() &&
+        !ctx.hasPendingMessages()
+      ) {
+        toolCtx.messageBus.setLocalActivity("idle");
+      }
+    }, 0);
   });
 
   const tools = createTools(toolCtx);
