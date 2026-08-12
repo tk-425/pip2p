@@ -12,6 +12,7 @@ import type { PipMessage, AgentInfo, ConnectionStatus, ActivityState } from "./t
 const C = {
   bold: (s: string) => `\x1b[1m${s}\x1b[22m`,
   cyan: (s: string) => `\x1b[36m${s}\x1b[39m`,
+  dim: (s: string) => `\x1b[2m${s}\x1b[22m`,
   yellow: (s: string) => `\x1b[33m${s}\x1b[39m`,
   reset: "\x1b[0m",
 };
@@ -27,6 +28,9 @@ export class WidgetManager {
   private connectionStatus: ConnectionStatus = "file";
   private liveAgents: AgentInfo[] = [];
   private resolvedThreadIds: Set<string> = new Set();
+  private spinnerFrame = 0;
+  private spinnerTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly spinnerFrames = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
 
   constructor(
     private agentName: string,
@@ -149,6 +153,7 @@ export class WidgetManager {
    * Hide all widgets
    */
   hideAll(): void {
+    this.stopSpinner();
     this.ctx.ui.setWidget(`${this.agentName}-agents`, undefined);
   }
 
@@ -159,6 +164,13 @@ export class WidgetManager {
    */
   private updateWidget(): void {
     const liveConnections = this.liveAgents.filter((agent) => agent.name !== this.agentName);
+    const hasRunningPeer = liveConnections.some((agent) => agent.activity === "running");
+
+    if (hasRunningPeer) {
+      this.startSpinner();
+    } else {
+      this.stopSpinner();
+    }
 
     if (liveConnections.length === 0) {
       if (this.connectionStatus === "file") {
@@ -186,9 +198,9 @@ export class WidgetManager {
 
     const activityIndicator = (activity: ActivityState) => {
       switch (activity) {
-        case "idle": return "💤";
-        case "running": return "⚙️";
-        default: return "❔";
+        case "idle": return "·";
+        case "running": return this.spinnerFrames[this.spinnerFrame];
+        default: return C.dim("?");
       }
     };
 
@@ -202,12 +214,29 @@ export class WidgetManager {
       const inboxBadge = unread && unread.length > 0
         ? `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
         : "";
-      lines.push(`${icon} ${paddedName} - ${act}${inboxBadge}`);
+      lines.push(`${icon} ${paddedName}  ${act}${inboxBadge}`);
     };
 
     for (const agent of liveConnections) renderAgent(agent);
 
     this.ctx.ui.setWidget(`${this.agentName}-agents`, lines);
+  }
+
+  private startSpinner(): void {
+    if (this.spinnerTimer) return;
+
+    this.spinnerTimer = setInterval(() => {
+      this.spinnerFrame = (this.spinnerFrame + 1) % this.spinnerFrames.length;
+      this.updateWidget();
+    }, 120);
+  }
+
+  private stopSpinner(): void {
+    if (!this.spinnerTimer) return;
+
+    clearInterval(this.spinnerTimer);
+    this.spinnerTimer = null;
+    this.spinnerFrame = 0;
   }
 
   private getSkillBadge(messages: PipMessage[]): string {
