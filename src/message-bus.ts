@@ -44,6 +44,7 @@ export class MessageBus {
   // Track recent messages for smart reply detection
   private recentIncoming: Map<string, PipMessage> = new Map(); // from agent -> last message
   private recentOutgoing: Map<string, PipMessage> = new Map(); // to agent -> last message
+  private queuedOutgoing: Map<string, PipMessage[]> = new Map();
 
   // Track processed message IDs to prevent duplicates
   private processedMessageIds: Set<string> = new Set();
@@ -129,15 +130,46 @@ export class MessageBus {
     // Track outgoing message
     this.recentOutgoing.set(to, message);
 
-    if (this.status === "live") {
-      // Live mode: send via WebSocket client
-      this.client?.sendTo(to, message);
+    if (this.status === "live" && this.shouldQueueForRunningPeer(to, type)) {
+      const queued = this.queuedOutgoing.get(to) ?? [];
+      queued.push(message);
+      this.queuedOutgoing.set(to, queued);
     } else {
-      // File mode: write to file
-      this.writeToFile(to, message);
+      this.deliverMessage(to, message);
     }
 
     return message;
+  }
+
+  /** Return whether a message is waiting for the target to become idle. */
+  isMessageQueued(messageId: string): boolean {
+    for (const messages of this.queuedOutgoing.values()) {
+      if (messages.some((message) => message.id === messageId)) return true;
+    }
+    return false;
+  }
+
+  private shouldQueueForRunningPeer(to: string, type: MessageType): boolean {
+    if (this.getAgentActivity(to) !== "running") return false;
+    return type === "task" || type === "message" || type === "invoke-skill" || type === "approval-request";
+  }
+
+  private deliverMessage(to: string, message: PipMessage): void {
+    if (this.status === "live") {
+      this.client?.sendTo(to, message);
+    } else {
+      this.writeToFile(to, message);
+    }
+  }
+
+  private flushQueuedMessages(agentName: string): void {
+    if (this.status !== "live" || this.getAgentActivity(agentName) === "running") return;
+    const queued = this.queuedOutgoing.get(agentName);
+    if (!queued || queued.length === 0) return;
+    this.queuedOutgoing.delete(agentName);
+    for (const message of queued) {
+      this.deliverMessage(agentName, message);
+    }
   }
 
   /**
@@ -351,6 +383,7 @@ export class MessageBus {
       const idx = this.liveAgents.findIndex((a) => a.name === agent);
       if (idx === -1) return;
       this.liveAgents[idx] = { ...this.liveAgents[idx], activity };
+      this.flushQueuedMessages(agent);
       const snapshot = this.getLiveAgents();
       for (const handler of this.liveAgentHandlers) {
         handler(snapshot);
@@ -410,6 +443,9 @@ export class MessageBus {
 
   private setLiveAgents(agents: AgentInfo[]): void {
     this.liveAgents = agents;
+    for (const agent of agents) {
+      this.flushQueuedMessages(agent.name);
+    }
     const snapshot = this.getLiveAgents();
     for (const handler of this.liveAgentHandlers) {
       handler(snapshot);
