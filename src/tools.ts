@@ -578,7 +578,7 @@ function createReplyToAgentTool(ctx: ToolContext) {
     label: "Reply to Agent",
     description: "Reply to a message from another agent",
     promptGuidelines: [
-      "Use reply_to_agent to answer a pip2p message that was already received.",
+      "Use reply_to_agent for an explicit progress, clarification, approval, or early-completion reply to a pip2p message; ordinary delegated final results are completion-gated until the turn settles.",
       "After reply_to_agent returns, stop and do not wait for another agent's reply in the same turn.",
       "After reply_to_agent returns, do not call get_inbox in the same turn unless the user explicitly asks you to check messages immediately.",
     ],

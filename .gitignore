@@ -23,6 +23,7 @@ CONTEXT.md
 .claude/
 .codex/
 .opencode/
+.pi/
 .mcp.json
 opencode.json
 CLAUDE.md

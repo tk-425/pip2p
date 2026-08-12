@@ -53,9 +53,11 @@ Rules:
 - If you need approval, send a structured approval request to ${invokerName} with request_approval_from_agent.
 - Immediately after request_approval_from_agent, stop the current turn. Do not call get_inbox and do not wait on irc.
 - Approval decisions arrive through the structured approval protocol and will resume the delegated workflow automatically when delivered.
-- For replies, clarifications, progress updates, and final results back to ${invokerName}, use reply_to_agent so the message goes to ${invokerName}'s inbox.
-- Immediately after reply_to_agent, stop the current turn and wait for the next inbound message from ${invokerName} before continuing.
+- For explicit progress updates, clarifications, approval coordination, or early completion replies back to ${invokerName}, use reply_to_agent; these replies are sent immediately.
+- For the normal final result, complete and validate all assigned work, then let the automatic completion-gated final reply deliver it after the turn settles.
+- Immediately after an explicit reply_to_agent, stop the current turn and wait for the next inbound message from ${invokerName} before continuing.
 - Do not use send_to_agent task mode to return delegated skill results to ${invokerName}.
+- Do not send an ordinary final result early.
 - Do not rely only on the local user for delegated approval flow.
 - If the local user resolves approval first, use resolve_local_approval, but continue treating ${invokerName} as part of the delegated workflow.`;
 }
@@ -111,9 +113,11 @@ ${preamble}`;
 
   const footer = `## ⚠️  REMINDER — REPLY REQUIRED
 
-When you finish this skill, you MUST use **reply_to_agent** to send your
-results to **${invokerName}**'s inbox. Do NOT just display results locally —
-${invokerName} cannot see your output unless you explicitly reply.`;
+When you finish this skill, complete and validate the work so the automatic
+completion-gated final reply can send the result after the turn settles. Use
+**reply_to_agent** only for an explicit progress update, clarification,
+approval coordination, or early completion reply. Do NOT just display results
+locally — **${invokerName}** cannot see the final result unless it is delivered.`;
 
   const message = `${header}\n\n---\n\n## SKILL CONTENT\n\n${body}\n\n---\n\n${footer}\n\n${metaLines.join("\n")}`;
   return {
@@ -163,6 +167,7 @@ type ActiveInvokeSession = {
   explicitReplySent: boolean;
   approvalRequestSent: boolean;
   awaitingApprovalDecision: boolean;
+  candidateResponse?: string;
 };
 
 function extractAssistantText(message: { content?: Array<{ type?: string; text?: string }> }): string {
@@ -264,6 +269,7 @@ export default function (pi: ExtensionAPI) {
     if (!toolCtx.messageBus || !text) {
       return;
     }
+    session.candidateResponse = undefined;
     toolCtx.messageBus.sendMessage(session.requester, text, "response", {
       inReplyTo: session.requestMessageId,
       invokeThreadId: session.threadId,
@@ -418,7 +424,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         toolCtx.currentInboundMessage = msg;
-        let instruction = `[pip2p] ${msg.from} replied: "${msg.content}"\n\nIMPORTANT:\n1. Continue based on this reply and SHOW your response to your user if you send one.\n2. If you need to answer ${msg.from}, use send_to_agent or reply_to_agent. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message.`;
+        let instruction = `[pip2p] ${msg.from} replied: "${msg.content}"\n\nIMPORTANT:\n1. Continue based on this reply and SHOW your response to your user if you send one.\n2. This is an ordinary response, not an automatic delegated-skill session: send exactly one final reply_to_agent response to ${msg.from} after any remaining work is complete. Use interim replies only when explicitly requested. If required information is missing or a decision is unclear, stop and ask ${msg.from} rather than guessing. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After the final reply, STOP and wait for new user input or a new message.`;
 
         const skillName = detectSkillReference(msg.content);
         if (skillName) {
@@ -464,7 +470,7 @@ export default function (pi: ExtensionAPI) {
 
       toolCtx.currentInboundMessage = msg;
 
-      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out your response and SHOW it to your user so they can see what you're sending.\n2. Use send_to_agent or reply_to_agent to send your response back to ${msg.from}. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After sending, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
+      let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out and validate the complete result before replying.\n2. This is a normal task/message, not an automatic delegated-skill session: send exactly one final reply_to_agent response to ${msg.from} after all work is complete. Use interim replies only when explicitly requested. If required information is missing or a decision is unclear, stop and ask ${msg.from} rather than guessing. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After the final reply, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
 
       const skillName = detectSkillReference(msg.content);
       if (skillName) {
@@ -612,37 +618,36 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    relayInvokeSessionResponse(activeInvokeSession, text);
-    clearInvokeSession();
+    activeInvokeSession.candidateResponse = text;
   });
 
-  pi.on("agent_end", (event) => {
+  pi.on("agent_end", (_event, lifecycleCtx) => {
     if (!activeInvokeSession || !toolCtx.messageBus) {
       return;
     }
-    if (activeInvokeSession.mode !== "interactive" || activeInvokeSession.explicitReplySent) {
+    if (activeInvokeSession.explicitReplySent || activeInvokeSession.awaitingApprovalDecision) {
       return;
     }
 
-    const assistantMessages = event.messages.filter((message) => message.role === "assistant");
-    for (let idx = assistantMessages.length - 1; idx >= 0; idx--) {
-      const text = extractAssistantText(assistantMessages[idx] as { content?: Array<{ type?: string; text?: string }> });
-      if (!text) {
-        continue;
-      }
-      if (activeInvokeSession.awaitingApprovalDecision) {
+    setTimeout(() => {
+      if (
+        !activeInvokeSession ||
+        !toolCtx.messageBus ||
+        activeInvokeSession.explicitReplySent ||
+        activeInvokeSession.awaitingApprovalDecision ||
+        !lifecycleCtx.isIdle() ||
+        lifecycleCtx.hasPendingMessages()
+      ) {
         return;
       }
-      if (!activeInvokeSession.approvalRequestSent && looksLikeApprovalRequest(text)) {
-        if (synthesizeInvokeSessionApprovalRequest(activeInvokeSession, text)) {
-          return;
-        }
-      }
 
+      const text = activeInvokeSession.candidateResponse;
+      if (!text) {
+        return;
+      }
       relayInvokeSessionResponse(activeInvokeSession, text);
       clearInvokeSession();
-      return;
-    }
+    }, 0);
   });
 
   pi.on("agent_start", () => {
