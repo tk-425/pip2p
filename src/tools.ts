@@ -540,7 +540,10 @@ function createListAgentsTool(ctx: ToolContext) {
     parameters: Type.Object({}),
     async execute() {
       const s = getState(ctx);
-      const liveConnections = s.messageBus.getLiveAgents().filter((agent) => agent.name !== s.agentName);
+      const liveConnections = s.messageBus
+        .getLiveAgents()
+        .filter((agent) => agent.name !== s.agentName)
+        .sort((a, b) => Number(b.isCoordinator) - Number(a.isCoordinator));
 
       if (liveConnections.length === 0) {
         return {
