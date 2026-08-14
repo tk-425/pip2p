@@ -163,7 +163,9 @@ export class WidgetManager {
    * Render the unified widget with agents list and inline inbox badges.
    */
   private updateWidget(): void {
-    const liveConnections = this.liveAgents.filter((agent) => agent.name !== this.agentName);
+    const liveConnections = this.liveAgents
+      .filter((agent) => agent.name !== this.agentName)
+      .sort((a, b) => Number(b.isCoordinator) - Number(a.isCoordinator));
     const hasRunningPeer = liveConnections.some((agent) => agent.activity === "running");
 
     if (hasRunningPeer) {
