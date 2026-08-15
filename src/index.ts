@@ -351,7 +351,7 @@ export default function (pi: ExtensionAPI) {
     const isCoordinatorRecipient = () => readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
     const injectCoordinatorMessage = (msg: PipMessage): void => {
       toolCtx.currentInboundMessage = msg;
-      const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\\n\\nIMPORTANT:\\n1. Work out and validate the complete result before replying.\\n2. This message is already delivered; do NOT call get_inbox.\\n3. Send exactly one final reply_to_agent response to ${msg.from} after all work is complete.\\n4. After the final reply, STOP and wait for new user input or a new message.`;
+      const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\\n\\nIMPORTANT:\\n1. Present this received message to your user and explain what was received in your own words when useful.\\n2. This message is already delivered; do NOT call get_inbox.\\n3. Do not send a reply_to_agent response or take follow-up action unless your user explicitly asks you to.\\n4. After presenting the message, stop and wait for your user's direction.`;
       pi.sendUserMessage(instruction);
     };
     flushCoordinatorMessages = () => {
