@@ -1,6 +1,6 @@
 {
   "name": "pip2p",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Pi-to-Pi multi-agent communication extension",
   "type": "module",
   "pi": {

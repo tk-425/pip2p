@@ -19,7 +19,7 @@ import {
   isCoordinatorAlive,
   removeServerInfo,
 } from "./agent-registry.js";
-import type { PipMessage, ConnectionStatus, MessageType, AgentInfo, ActivityState } from "./types.js";
+import type { PipMessage, ConnectionStatus, MessageType, AgentInfo, ActivityState, TaskContext } from "./types.js";
 
 export interface SendMessageOptions {
   inReplyTo?: PipMessage["inReplyTo"];
@@ -29,6 +29,7 @@ export interface SendMessageOptions {
   approvalDecision?: PipMessage["approvalDecision"];
   threadResolution?: PipMessage["threadResolution"];
   threadId?: PipMessage["threadId"];
+  taskContext?: TaskContext;
 }
 
 export type StatusChangeHandler = (status: ConnectionStatus) => void;
@@ -108,6 +109,7 @@ export class MessageBus {
       approvalDecision,
       threadResolution,
       threadId,
+      taskContext,
     } = options;
 
     const message: PipMessage = {
@@ -125,6 +127,7 @@ export class MessageBus {
       approvalDecision,
       threadResolution,
       invokeThreadId,
+      taskContext,
     };
 
     // Track outgoing message

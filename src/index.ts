@@ -502,6 +502,18 @@ export default function (pi: ExtensionAPI) {
 
       let instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\n\nIMPORTANT:\n1. Work out and validate the complete result before replying.\n2. This is a normal task/message, not an automatic delegated-skill session: send exactly one final reply_to_agent response to ${msg.from} after all work is complete. Use interim replies only when explicitly requested. If required information is missing or a decision is unclear, stop and ask ${msg.from} rather than guessing. Do NOT just reply in this conversation — ${msg.from} cannot see your responses here.\n3. If this message is only an acknowledgment, thanks, sign-off, closure note, "standing by", "forwarded to main", "got it", "ok", or emoji-only reply with no new request or question, do NOT respond. Stop immediately.\n4. After the final reply, STOP and wait for new user input or a new message. Do NOT continue the conversation or invent follow-up requests.\n\nThe message content is already provided above — you do NOT need to call get_inbox.`;
 
+      if (msg.taskContext) {
+        const contextLines = [
+          msg.taskContext.originalRequest ? `Original user request (authoritative): ${msg.taskContext.originalRequest}` : "",
+          msg.taskContext.constraints?.length ? `Explicit constraints: ${msg.taskContext.constraints.join("; ")}` : "",
+          msg.taskContext.expectedResult ? `Expected result: ${msg.taskContext.expectedResult}` : "",
+          msg.taskContext.fallbackPolicy ? `Fallback policy: ${msg.taskContext.fallbackPolicy}` : "",
+        ].filter(Boolean);
+        if (contextLines.length > 0) {
+          instruction += `\n\nTask context (preserve these requirements):\n${contextLines.join("\n")}`;
+        }
+      }
+
       const skillName = detectSkillReference(msg.content);
       if (skillName) {
         instruction += `\n\nHint: ${msg.from} mentioned the "${skillName}" skill. You can invoke it with /skill:${skillName}`;
