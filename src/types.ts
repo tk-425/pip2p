@@ -42,6 +42,13 @@ export type MessageType =
 
 export type SkillReplyMode = "auto" | "interactive";
 
+export interface TaskContext {
+  originalRequest?: string;
+  constraints?: string[];
+  expectedResult?: string;
+  fallbackPolicy?: string;
+}
+
 export interface SkillInvocation {
   skillName: string;
   args?: string;
@@ -101,6 +108,7 @@ export interface PipMessage {
   approvalDecision?: ApprovalDecision;
   threadResolution?: ThreadResolution;
   invokeThreadId?: string;
+  taskContext?: TaskContext;
 }
 
 export type ConnectionStatus = "live" | "file";
