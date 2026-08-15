@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getInboxDir } from "./agent-registry.js";
 import { getEffectiveThreadId } from "./threading.js";
-import type { PipMessage, AgentInfo, ConnectionStatus, ActivityState } from "./types.js";
+import type { PipMessage, AgentInfo, ConnectionStatus, ActivityState, InboxDeliveryMode } from "./types.js";
 
 // ANSI color helpers for terminal rendering
 const C = {
@@ -28,6 +28,8 @@ export class WidgetManager {
   private connectionStatus: ConnectionStatus = "file";
   private liveAgents: AgentInfo[] = [];
   private resolvedThreadIds: Set<string> = new Set();
+  private coordinatorInboxMode: InboxDeliveryMode = "default";
+  private isCoordinator = false;
   private spinnerFrame = 0;
   private spinnerTimer: ReturnType<typeof setInterval> | null = null;
   private readonly spinnerFrames = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
@@ -143,6 +145,12 @@ export class WidgetManager {
   /**
    * Update the unified agents + inbox widget.
    */
+  setCoordinatorInboxMode(mode: InboxDeliveryMode, isCoordinator: boolean): void {
+    this.coordinatorInboxMode = mode;
+    this.isCoordinator = isCoordinator;
+    this.updateWidget();
+  }
+
   updateAgentsWidget(connectionStatus: ConnectionStatus, liveAgents: AgentInfo[] = []): void {
     this.connectionStatus = connectionStatus;
     this.liveAgents = [...liveAgents];
@@ -185,7 +193,6 @@ export class WidgetManager {
     }
 
     const statusIndicator = this.connectionStatus === "live" ? "🟢 Live" : "🟡 File Mode";
-
     // Count unread per sender
     const unreadBySender = new Map<string, PipMessage[]>();
     for (const msg of this.inbox.filter((m) => !m.read && !this.isThreadResolved(m))) {
@@ -196,7 +203,11 @@ export class WidgetManager {
 
     const maxNameLen = Math.max(...liveConnections.map((agent) => agent.name.length));
     const width = (process.stdout.columns || 80) - 2;
-    const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}`];
+    const approvalCount = this.inbox.filter((msg) => !msg.read && msg.type === "approval-request" && !this.isThreadResolved(msg)).length;
+    const modeIndicator = this.isCoordinator && this.coordinatorInboxMode === "auto-inject"
+      ? ` ⚡${approvalCount > 0 ? ` 📥 ${C.bold(C.yellow(`(${approvalCount})`))}` : ""}`
+      : "";
+    const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}${modeIndicator}`];
 
     const activityIndicator = (activity: ActivityState) => {
       switch (activity) {
@@ -213,10 +224,15 @@ export class WidgetManager {
         : agent.name.padEnd(maxNameLen);
       const act = activityIndicator(agent.activity ?? "unknown");
       const unread = unreadBySender.get(agent.name);
-      const inboxBadge = unread && unread.length > 0
-        ? `  ⚡ ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
+      const showOrdinaryUnread = !this.isCoordinator || this.coordinatorInboxMode === "default";
+      const ordinaryBadge = showOrdinaryUnread && unread && unread.length > 0
+        ? `  📨 ${C.bold(C.yellow(`(${unread.length})`))}${this.getSkillBadge(unread)}`
         : "";
-      lines.push(`${icon} ${paddedName}  ${act}${inboxBadge}`);
+      const inboxBadge = ordinaryBadge;
+      const approvalBadge = this.isCoordinator && this.coordinatorInboxMode === "auto-inject" && approvalCount > 0 && agent.name === this.agentName
+        ? `  📥 ${C.bold(C.yellow(`(${approvalCount})`))}`
+        : "";
+      lines.push(`${icon} ${paddedName}  ${act}${inboxBadge}${approvalBadge}`);
     };
 
     for (const agent of liveConnections) renderAgent(agent);

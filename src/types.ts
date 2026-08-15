@@ -5,6 +5,12 @@
 
 export type ActivityState = "idle" | "running" | "unknown";
 
+export type InboxDeliveryMode = "default" | "auto-inject";
+
+export interface ProjectSettings {
+  coordinatorInboxDeliveryMode: InboxDeliveryMode;
+}
+
 export interface AgentInfo {
   name: string;
   pid: number;
