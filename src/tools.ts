@@ -16,6 +16,7 @@ import type {
   PipMessage,
   MessageType,
   SkillReplyMode,
+  TaskContext,
 } from "./types.js";
 
 export interface ToolContext {
@@ -111,12 +112,20 @@ function createSendToAgentTool(ctx: ToolContext) {
     description: "Send a task or message to another agent in the pip2p network",
     promptGuidelines: [
       "Use send_to_agent to delegate work or send a message to another pip2p agent.",
+      "Normalize the task for clarity, but preserve the user's explicit intent and constraints; do not invent tools or capabilities.",
+      "If a task names a protocol or capability rather than a specific tool, let the receiving agent choose the best available matching capability.",
+      "Only ask for clarification or report failure when no useful capability exists or an explicit constraint cannot be satisfied.",
       "After send_to_agent returns, do not wait for the other agent's reply in the same turn.",
       "After send_to_agent returns, do not call get_inbox in the same turn unless the user explicitly asks you to check messages immediately.",
     ],
     parameters: Type.Object({
       to: Type.String({ description: "Target agent name" }),
-      message: Type.String({ description: "Message or task description" }),
+      message: Type.String({ description: "Normalized task or message; preserve explicit user intent and constraints" }),
+      taskContext: Type.Optional(Type.Object({
+        constraints: Type.Optional(Type.Array(Type.String(), { description: "Explicit requirements that must be preserved" })),
+        expectedResult: Type.Optional(Type.String({ description: "Desired response shape or deliverable" })),
+        fallbackPolicy: Type.Optional(Type.String({ description: "How to proceed when the preferred capability is unavailable" })),
+      })),
       type: Type.Optional(
         Type.Union([Type.Literal("task"), Type.Literal("message")], {
           default: "task",
@@ -129,7 +138,16 @@ function createSendToAgentTool(ctx: ToolContext) {
       const to = getStringParam(record, "to");
       const message = getStringParam(record, "message");
       const requestedType = getStringParam(record, "type");
+      const rawTaskContext = getObjectParam(record.taskContext);
+      const taskContext: TaskContext | undefined = Object.keys(rawTaskContext).length > 0 ? {
+        constraints: getStringArrayParam(rawTaskContext, "constraints"),
+        expectedResult: getStringParam(rawTaskContext, "expectedResult"),
+        fallbackPolicy: getStringParam(rawTaskContext, "fallbackPolicy"),
+      } : undefined;
       const type: MessageType = requestedType === "message" ? "message" : "task";
+      const enrichedTaskContext = type === "task" && ctx.currentPrompt.trim()
+        ? { ...taskContext, originalRequest: ctx.currentPrompt.trim() }
+        : taskContext;
 
       if (!to || !message) {
         return {
@@ -152,7 +170,7 @@ function createSendToAgentTool(ctx: ToolContext) {
       if (unavailableTarget) return unavailableTarget;
 
       const threadId = getActiveThreadId(ctx) ?? crypto.randomUUID();
-      const sent = s.messageBus.sendMessage(to, message, type, { threadId });
+      const sent = s.messageBus.sendMessage(to, message, type, { threadId, taskContext: enrichedTaskContext });
       const queued = s.messageBus.isMessageQueued(sent.id);
       ctx.suppressInboxPollingThisTurn = true;
       return {
