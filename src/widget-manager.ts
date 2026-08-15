@@ -29,6 +29,7 @@ export class WidgetManager {
   private liveAgents: AgentInfo[] = [];
   private resolvedThreadIds: Set<string> = new Set();
   private coordinatorInboxMode: InboxDeliveryMode = "default";
+  private coordinatorPendingCount = 0;
   private isCoordinator = false;
   private spinnerFrame = 0;
   private spinnerTimer: ReturnType<typeof setInterval> | null = null;
@@ -151,6 +152,11 @@ export class WidgetManager {
     this.updateWidget();
   }
 
+  setCoordinatorPendingCount(count: number): void {
+    this.coordinatorPendingCount = Math.max(0, count);
+    this.updateWidget();
+  }
+
   updateAgentsWidget(connectionStatus: ConnectionStatus, liveAgents: AgentInfo[] = []): void {
     this.connectionStatus = connectionStatus;
     this.liveAgents = [...liveAgents];
@@ -205,7 +211,7 @@ export class WidgetManager {
     const width = (process.stdout.columns || 80) - 2;
     const approvalCount = this.inbox.filter((msg) => !msg.read && msg.type === "approval-request" && !this.isThreadResolved(msg)).length;
     const modeIndicator = this.isCoordinator && this.coordinatorInboxMode === "auto-inject"
-      ? ` ⚡${approvalCount > 0 ? ` 📥 ${C.bold(C.yellow(`(${approvalCount})`))}` : ""}`
+      ? ` ⚡${this.coordinatorPendingCount > 0 ? ` ${C.bold(C.yellow(`(${this.coordinatorPendingCount})`))}` : ""}${approvalCount > 0 ? ` 📥 ${C.bold(C.yellow(`(${approvalCount})`))}` : ""}`
       : "";
     const lines: string[] = ["─".repeat(width), `Agents: ${statusIndicator}${modeIndicator}`];
 

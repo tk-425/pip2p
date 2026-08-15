@@ -355,17 +355,19 @@ export default function (pi: ExtensionAPI) {
       pi.sendUserMessage(instruction);
     };
     flushCoordinatorMessages = () => {
-      const queued = pendingCoordinatorMessages.splice(0, pendingCoordinatorMessages.length);
-      for (const message of queued) injectCoordinatorMessage(message);
+      const next = pendingCoordinatorMessages.shift();
+      toolCtx.widgetManager?.setCoordinatorPendingCount(pendingCoordinatorMessages.length);
+      if (next) injectCoordinatorMessage(next);
     };
 
     const deliverCoordinatorMessage = (msg: PipMessage): void => {
-      if (coordinatorInboxMode !== "auto-inject" || !ctx.hasUI) {
+      if (coordinatorInboxMode !== "auto-inject" || !ctx.hasUI || toolCtx.messageBus?.getStatus() !== "live") {
         toolCtx.widgetManager?.addMessage(msg);
         return;
       }
       if (!ctx.isIdle() || ctx.hasPendingMessages()) {
         pendingCoordinatorMessages.push(msg);
+        toolCtx.widgetManager?.setCoordinatorPendingCount(pendingCoordinatorMessages.length);
         return;
       }
       injectCoordinatorMessage(msg);
@@ -758,8 +760,15 @@ export default function (pi: ExtensionAPI) {
         if (action === "Set inbox delivery mode") {
           const selectedMode = await ctx.ui.select("Select mode", ["Default mode", "Auto-inject mode"]);
           if (!selectedMode) return;
-          coordinatorInboxMode = selectedMode === "Auto-inject mode" ? "auto-inject" : "default";
+          const nextMode: InboxDeliveryMode = selectedMode === "Auto-inject mode" ? "auto-inject" : "default";
+          if (nextMode === "default") {
+            for (const pendingMessage of pendingCoordinatorMessages) {
+              toolCtx.widgetManager?.addMessage(pendingMessage);
+            }
+          }
+          coordinatorInboxMode = nextMode;
           pendingCoordinatorMessages.splice(0, pendingCoordinatorMessages.length);
+          toolCtx.widgetManager?.setCoordinatorPendingCount(0);
           setCoordinatorInboxDeliveryMode(ctx.cwd, coordinatorInboxMode);
           toolCtx.widgetManager?.setCoordinatorInboxMode(coordinatorInboxMode, true);
           ctx.ui.notify(`Coordinator inbox delivery mode: ${selectedMode}.`, "info");
