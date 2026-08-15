@@ -19,9 +19,12 @@ import {
   getCoordinator,
   getAgentByPid,
   readServerInfo,
+  ensureProjectSettings,
+  readProjectSettings,
+  setCoordinatorInboxDeliveryMode,
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
-import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry, ActivityState } from "./types.js";
+import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry, ActivityState, InboxDeliveryMode, PipMessage } from "./types.js";
 import { detectSkillReference } from "./skill-detect.js";
 
 const PIP2P_USAGE = "/pip2p, /pip2p start, /pip2p status, /pip2p stop";
@@ -243,6 +246,9 @@ function resolvePendingApproval(
 export default function (pi: ExtensionAPI) {
   let connectionStatus: ConnectionStatus = "file";
   let isActive = false;
+  let coordinatorInboxMode: InboxDeliveryMode = "default";
+  const pendingCoordinatorMessages: PipMessage[] = [];
+  let flushCoordinatorMessages: () => void = () => {};
 
   // Mutable context shared with tools — registered at factory time,
   // populated after activation so omp builds its active tool set correctly.
@@ -315,7 +321,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function activatePip2p(
-    ctx: { cwd: string; hasUI: boolean; ui: { notify: (message: string, level?: "info" | "warning" | "error" | "success") => void; setWidget: (key: string, lines: string[] | undefined) => void; } },
+    ctx: { cwd: string; hasUI: boolean; isIdle: () => boolean; hasPendingMessages: () => boolean; ui: { notify: (message: string, level?: "info" | "warning" | "error" | "success") => void; setWidget: (key: string, lines: string[] | undefined) => void; } },
     agentName: string,
     reason: "manual" | "restore",
   ): Promise<{ role: "coordinator" | "worker"; isCoordinator: boolean }> {
@@ -330,6 +336,7 @@ export default function (pi: ExtensionAPI) {
     toolCtx.cwd = ctx.cwd;
 
     const isNew = ensurePip2pDirs(ctx.cwd);
+    ensureProjectSettings(ctx.cwd);
     ensureAgentInbox(ctx.cwd, agentName);
     if (isNew) {
       ensureGitignore(ctx.cwd);
@@ -339,6 +346,32 @@ export default function (pi: ExtensionAPI) {
     toolCtx.widgetManager.syncFromDisk();
 
     toolCtx.messageBus = new MessageBus(agentName, ctx.cwd);
+    coordinatorInboxMode = readProjectSettings(ctx.cwd).coordinatorInboxDeliveryMode;
+
+    const isCoordinatorRecipient = () => readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+    const injectCoordinatorMessage = (msg: PipMessage): void => {
+      toolCtx.currentInboundMessage = msg;
+      const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\\n\\nIMPORTANT:\\n1. Present this received message to your user and explain what was received in your own words when useful.\\n2. This message is already delivered; do NOT call get_inbox.\\n3. Do not send a reply_to_agent response or take follow-up action unless your user explicitly asks you to.\\n4. After presenting the message, stop and wait for your user's direction.`;
+      pi.sendUserMessage(instruction);
+    };
+    flushCoordinatorMessages = () => {
+      const next = pendingCoordinatorMessages.shift();
+      toolCtx.widgetManager?.setCoordinatorPendingCount(pendingCoordinatorMessages.length);
+      if (next) injectCoordinatorMessage(next);
+    };
+
+    const deliverCoordinatorMessage = (msg: PipMessage): void => {
+      if (coordinatorInboxMode !== "auto-inject" || !ctx.hasUI || toolCtx.messageBus?.getStatus() !== "live") {
+        toolCtx.widgetManager?.addMessage(msg);
+        return;
+      }
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+        pendingCoordinatorMessages.push(msg);
+        toolCtx.widgetManager?.setCoordinatorPendingCount(pendingCoordinatorMessages.length);
+        return;
+      }
+      injectCoordinatorMessage(msg);
+    };
 
     toolCtx.messageBus.onMessage(async (msg) => {
 
@@ -416,10 +449,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (msg.type === "response") {
-        const isCoordinatorRecipient = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
-
-        if (isCoordinatorRecipient) {
-          toolCtx.widgetManager?.addMessage(msg);
+        if (isCoordinatorRecipient()) {
+          deliverCoordinatorMessage(msg);
           return;
         }
 
@@ -462,9 +493,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const isCoordinatorRecipient = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
-      if (isCoordinatorRecipient) {
-        toolCtx.widgetManager?.addMessage(msg);
+      if (isCoordinatorRecipient()) {
+        deliverCoordinatorMessage(msg);
         return;
       }
 
@@ -492,6 +522,7 @@ export default function (pi: ExtensionAPI) {
     const role = await toolCtx.messageBus.init();
     const serverInfo = readServerInfo(ctx.cwd);
     const isCoordinator = serverInfo?.coordinator === agentName;
+    toolCtx.widgetManager.setCoordinatorInboxMode(coordinatorInboxMode, isCoordinator);
 
     addAgent(ctx.cwd, {
       name: agentName,
@@ -503,6 +534,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     connectionStatus = toolCtx.messageBus.getStatus();
+    toolCtx.widgetManager.setCoordinatorInboxMode(coordinatorInboxMode, isCoordinator);
     toolCtx.widgetManager.updateAgentsWidget(connectionStatus, toolCtx.messageBus.getLiveAgents());
     isActive = true;
     ctx.ui.notify(`pip2p: ${agentName} ${reason === "restore" ? "reconnected" : "joined"} as ${isCoordinator ? "coordinator" : role}`, "info");
@@ -669,6 +701,9 @@ export default function (pi: ExtensionAPI) {
         !ctx.hasPendingMessages()
       ) {
         toolCtx.messageBus.setLocalActivity("idle");
+        if (coordinatorInboxMode === "auto-inject") {
+          flushCoordinatorMessages();
+        }
       }
     }, 0);
   });
@@ -708,13 +743,35 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        const action = await ctx.ui.select("pip2p", ["Status", "Stop pip2p", "Help"]);
+        const isCoordinator = readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
+        const actions = isCoordinator
+          ? ["Status", "Set inbox delivery mode", "Stop pip2p", "Help"]
+          : ["Status", "Stop pip2p", "Help"];
+        const action = await ctx.ui.select("pip2p", actions);
         if (!action) {
           return;
         }
 
         if (action === "Status") {
           notifyPip2pStatus(ctx);
+          return;
+        }
+
+        if (action === "Set inbox delivery mode") {
+          const selectedMode = await ctx.ui.select("Select mode", ["Default mode", "Auto-inject mode"]);
+          if (!selectedMode) return;
+          const nextMode: InboxDeliveryMode = selectedMode === "Auto-inject mode" ? "auto-inject" : "default";
+          if (nextMode === "default") {
+            for (const pendingMessage of pendingCoordinatorMessages) {
+              toolCtx.widgetManager?.addMessage(pendingMessage);
+            }
+          }
+          coordinatorInboxMode = nextMode;
+          pendingCoordinatorMessages.splice(0, pendingCoordinatorMessages.length);
+          toolCtx.widgetManager?.setCoordinatorPendingCount(0);
+          setCoordinatorInboxDeliveryMode(ctx.cwd, coordinatorInboxMode);
+          toolCtx.widgetManager?.setCoordinatorInboxMode(coordinatorInboxMode, true);
+          ctx.ui.notify(`Coordinator inbox delivery mode: ${selectedMode}.`, "info");
           return;
         }
 

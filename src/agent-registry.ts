@@ -4,11 +4,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentInfo, AgentRegistry, ServerInfo } from "./types.js";
+import type { AgentInfo, AgentRegistry, ServerInfo, ProjectSettings, InboxDeliveryMode } from "./types.js";
 
 const PIP2P_DIR = ".pip2p";
 const AGENTS_FILE = "agents.json";
 const SERVER_FILE = "server.json";
+const SETTINGS_FILE = "settings.json";
+const DEFAULT_PROJECT_SETTINGS: ProjectSettings = { coordinatorInboxDeliveryMode: "default" };
 
 export function getPip2pDir(cwd: string): string {
   return path.join(cwd, PIP2P_DIR);
@@ -24,6 +26,10 @@ export function getAgentsFilePath(cwd: string): string {
 
 export function getServerFilePath(cwd: string): string {
   return path.join(cwd, PIP2P_DIR, SERVER_FILE);
+}
+
+export function getSettingsFilePath(cwd: string): string {
+  return path.join(cwd, PIP2P_DIR, SETTINGS_FILE);
 }
 
 export function ensurePip2pDirs(cwd: string): boolean {
@@ -59,6 +65,41 @@ export function ensureGitignore(cwd: string): void {
     lines.push(pip2pEntry);
     fs.writeFileSync(gitignorePath, lines.join("\n"));
   }
+}
+
+export function ensureProjectSettings(cwd: string): ProjectSettings {
+  const filePath = getSettingsFilePath(cwd);
+  ensurePip2pDirs(cwd);
+  if (!fs.existsSync(filePath)) {
+    writeProjectSettings(cwd, DEFAULT_PROJECT_SETTINGS);
+    return { ...DEFAULT_PROJECT_SETTINGS };
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<ProjectSettings>;
+    const mode: InboxDeliveryMode = parsed.coordinatorInboxDeliveryMode === "auto-inject" ? "auto-inject" : "default";
+    const settings = { coordinatorInboxDeliveryMode: mode };
+    if (parsed.coordinatorInboxDeliveryMode !== mode) writeProjectSettings(cwd, settings);
+    return settings;
+  } catch {
+    writeProjectSettings(cwd, DEFAULT_PROJECT_SETTINGS);
+    return { ...DEFAULT_PROJECT_SETTINGS };
+  }
+}
+
+export function readProjectSettings(cwd: string): ProjectSettings {
+  return ensureProjectSettings(cwd);
+}
+
+export function writeProjectSettings(cwd: string, settings: ProjectSettings): void {
+  ensurePip2pDirs(cwd);
+  fs.writeFileSync(getSettingsFilePath(cwd), JSON.stringify(settings, null, 2));
+}
+
+export function setCoordinatorInboxDeliveryMode(cwd: string, mode: InboxDeliveryMode): ProjectSettings {
+  const settings = { coordinatorInboxDeliveryMode: mode };
+  writeProjectSettings(cwd, settings);
+  return settings;
 }
 
 export function ensureAgentInbox(cwd: string, agentName: string): void {
