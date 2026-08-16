@@ -6,6 +6,7 @@ import { Type } from "@sinclair/typebox";
 import { getOtherAgents, readServerInfo } from "./agent-registry.js";
 import { formatMessage } from "./skill-detect.js";
 import { getEffectiveThreadId } from "./threading.js";
+import { sortAgentsForPresentation } from "./agent-ordering.js";
 import type { MessageBus } from "./message-bus.js";
 import type { WidgetManager } from "./widget-manager.js";
 import type {
@@ -558,10 +559,9 @@ function createListAgentsTool(ctx: ToolContext) {
     parameters: Type.Object({}),
     async execute() {
       const s = getState(ctx);
-      const liveConnections = s.messageBus
-        .getLiveAgents()
-        .filter((agent) => agent.name !== s.agentName)
-        .sort((a, b) => Number(b.isCoordinator) - Number(a.isCoordinator));
+      const liveConnections = sortAgentsForPresentation(
+        s.messageBus.getLiveAgents().filter((agent) => agent.name !== s.agentName),
+      );
 
       if (liveConnections.length === 0) {
         return {
