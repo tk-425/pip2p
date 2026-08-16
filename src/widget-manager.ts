@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getInboxDir } from "./agent-registry.js";
 import { getEffectiveThreadId } from "./threading.js";
+import { sortAgentsForPresentation } from "./agent-ordering.js";
 import type { PipMessage, AgentInfo, ConnectionStatus, ActivityState, InboxDeliveryMode } from "./types.js";
 
 // ANSI color helpers for terminal rendering
@@ -177,9 +178,9 @@ export class WidgetManager {
    * Render the unified widget with agents list and inline inbox badges.
    */
   private updateWidget(): void {
-    const liveConnections = this.liveAgents
-      .filter((agent) => agent.name !== this.agentName)
-      .sort((a, b) => Number(b.isCoordinator) - Number(a.isCoordinator));
+    const liveConnections = sortAgentsForPresentation(
+      this.liveAgents.filter((agent) => agent.name !== this.agentName),
+    );
     const hasRunningPeer = liveConnections.some((agent) => agent.activity === "running");
 
     if (hasRunningPeer) {
