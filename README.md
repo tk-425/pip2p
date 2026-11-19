@@ -151,7 +151,7 @@ Workflow contract:
 - **task** - Work delegation (auto-injected for immediate processing on the receiving agent)
 - **message** - General communication (also auto-injected for immediate processing on the receiving agent)
 - **response** - Replies and results (shown in the recipient's inbox widget only)
-- **approval-request** - Structured approval requests (shown in the approver's inbox widget only)
+- **approval-request** - Structured approval requests follow the coordinator's inbox delivery setting: inbox in Default mode, automatic injection in Auto-inject mode when live with a UI (queued until idle if busy). Worker recipients and file/non-UI mode retain requests in the inbox.
 - **approval-decision** - Structured approval approvals/rejections (delivered directly to the waiting agent and not shown as a normal inbox message)
 
 ### Skill Invocation Modes
@@ -179,7 +179,7 @@ invoke_skill_on_agent --to bob --skill firecrawl --args "search latest Apple sto
 When delegated work on Bob needs approval:
 
 1. **Bob sends Alice a structured approval request** with `request_approval_from_agent`
-2. **Alice reviews the request from inbox** and responds with `respond_to_approval_request`
+2. **Alice reviews the request** from inbox, or from automatic injection if Alice is the coordinator with Auto-inject mode enabled in a live UI session, and responds with `respond_to_approval_request`
 3. **Bob can also resolve the same request locally** with `resolve_local_approval`
 4. **First approval wins** — whichever valid approval or rejection arrives first resolves the request
 5. **Approval decisions resume Bob directly**; they do not appear as a normal inbox message on Bob

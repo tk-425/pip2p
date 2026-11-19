@@ -25,7 +25,7 @@ import {
 } from "./agent-registry.js";
 import { createTools, type ToolContext } from "./tools.js";
 import type { ApprovalDecision, ApprovalRequest, ConnectionStatus, PendingApprovalEntry, ActivityState, InboxDeliveryMode, PipMessage } from "./types.js";
-import { detectSkillReference } from "./skill-detect.js";
+import { detectSkillReference, formatMessage } from "./skill-detect.js";
 
 const PIP2P_USAGE = "/pip2p, /pip2p start, /pip2p status, /pip2p stop";
 
@@ -351,7 +351,8 @@ export default function (pi: ExtensionAPI) {
     const isCoordinatorRecipient = () => readServerInfo(ctx.cwd)?.coordinator === toolCtx.agentName;
     const injectCoordinatorMessage = (msg: PipMessage): void => {
       toolCtx.currentInboundMessage = msg;
-      const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${msg.content}"\\n\\nIMPORTANT:\\n1. Present this received message to your user and explain what was received in your own words when useful.\\n2. This message is already delivered; do NOT call get_inbox.\\n3. Do not send a reply_to_agent response or take follow-up action unless your user explicitly asks you to.\\n4. After presenting the message, stop and wait for your user's direction.`;
+      const content = msg.type === "approval-request" ? formatMessage(msg) : msg.content;
+      const instruction = `[pip2p] ${msg.from} sent you a ${msg.type}: "${content}"\\n\\nIMPORTANT:\\n1. Present this received message to your user and explain what was received in your own words when useful.\\n2. This message is already delivered; do NOT call get_inbox.\\n3. Do not send a reply_to_agent response or take follow-up action unless your user explicitly asks you to.\\n4. After presenting the message, stop and wait for your user's direction.`;
       pi.sendUserMessage(instruction);
     };
     flushCoordinatorMessages = () => {
@@ -466,7 +467,11 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (msg.type === "approval-request") {
-        toolCtx.widgetManager?.addMessage(msg);
+        if (isCoordinatorRecipient()) {
+          deliverCoordinatorMessage(msg);
+        } else {
+          toolCtx.widgetManager?.addMessage(msg);
+        }
         return;
       }
 
